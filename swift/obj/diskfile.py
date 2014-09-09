@@ -215,6 +215,20 @@ def get_ondisk_files(files, datadir):
         " %s, meta_file: %s, ts_file: %s" % (data_file, meta_file, ts_file)
     return data_file, meta_file, ts_file
 
+def get_ring_partition(self, obj_name, obj_path):                                                          
+    """                                                                                                       
+    Get object ring partition
+    
+    :param obj_name: the name from the object metadata
+    :param obj_path: device-relative path of an object
+    :returns: object ring partition 
+    """                                                                                                        
+    pidx = diskfile.extract_policy_index(path)                                              
+    policy = POLICIES.get_by_index(pidx)                                                 
+    obj_ring = policy.object_ring            
+    sp = split_path(obj_name, maxsegs=3, rest_with_last=True)  
+    obj_ring_part = obj_ring.get_part(sp[0],sp[1],sp[2])
+    return obj_ring_part
 
 def hash_cleanup_listdir(hsh_path, reclaim_age=ONE_WEEK):
     """
@@ -834,7 +848,8 @@ class DiskFileReader(object):
     """
     def __init__(self, fp, data_file, obj_size, etag, threadpool,
                  disk_chunk_size, keep_cache_size, device_path, logger,
-                 quarantine_hook, keep_cache=False):
+                 obj_part, obj_ring_part, quarantine_hook,
+                 keep_cache=False):
         # Parameter tracking
         self._fp = fp
         self._data_file = data_file
@@ -843,8 +858,11 @@ class DiskFileReader(object):
         self._threadpool = threadpool
         self._disk_chunk_size = disk_chunk_size
         self._device_path = device_path
+        self._obj_part = device_path
+        self._device_path = device_path
         self._logger = logger
         self._quarantine_hook = quarantine_hook
+        
         if keep_cache:
             # Caller suggests we keep this in cache, only do it if the
             # object's size is less than the maximum.
@@ -1373,10 +1391,13 @@ class DiskFile(object):
                                  Not needed by the REST layer.
         :returns: a :class:`swift.obj.diskfile.DiskFileReader` object
         """
+        obj_ring_part = get_ring_partition(self._metadata['name'],
+                                           self._datadir)
         dr = DiskFileReader(
             self._fp, self._data_file, int(self._metadata['Content-Length']),
             self._metadata['ETag'], self._threadpool, self._disk_chunk_size,
             self._mgr.keep_cache_size, self._device_path, self._logger,
+            obj_partition = self._partition, obj_ring_part = obj_ring_part,
             quarantine_hook=_quarantine_hook, keep_cache=keep_cache)
         # At this point the reader object is now responsible for closing
         # the file pointer.
