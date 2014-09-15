@@ -22,7 +22,7 @@ import string
 from shutil import rmtree
 from hashlib import md5
 from tempfile import mkdtemp
-from test.unit import FakeLogger, patch_policies
+from test.unit import FakeLogger, FakeRing, patch_policies
 from swift.obj import auditor
 from swift.obj.diskfile import DiskFile, write_metadata, invalidate_hash, \
     get_data_dir, DiskFileManager, AuditLocation
@@ -30,9 +30,10 @@ from swift.common.utils import hash_path, mkdirs, normalize_timestamp, \
     storage_directory
 from swift.common.storage_policy import StoragePolicy
 
-
-_mocked_policies = [StoragePolicy(0, 'zero', False),
-                    StoragePolicy(1, 'one', True)]
+_mocked_policies = [StoragePolicy(0, 'zero', False,
+                    object_ring=FakeRing()),
+                    StoragePolicy(1, 'one', True,
+                    object_ring=FakeRing())]
 
 
 @patch_policies(_mocked_policies)
@@ -173,6 +174,30 @@ class TestAuditor(unittest.TestCase):
         auditor_worker.object_audit(
             AuditLocation(self.disk_file._datadir, 'sda', '0'))
         self.assertEquals(auditor_worker.quarantines, pre_quarantines + 1)
+
+    @mock.patch('swift.common.ring.Ring.get_part', return_value='fake')
+    def test_object_audit_invalid_partitions(self, mocked_get_part):
+        auditor_worker = auditor.AuditorWorker(self.conf, self.logger,
+                                               self.rcache, self.devices)
+        data = '0' * 1024
+        etag = md5()
+        with self.disk_file.create() as writer:
+            writer.write(data)
+            etag.update(data)
+            etag = etag.hexdigest()
+            timestamp = str(normalize_timestamp(time.time()))
+            metadata = {
+                'ETag': etag,
+                'X-Timestamp': timestamp,
+                'Content-Length': str(os.fstat(writer._fd).st_size),
+            }
+            writer.put(metadata)
+            pre_quarantines = auditor_worker.quarantines
+
+            auditor_worker.object_audit(
+                AuditLocation(self.disk_file._datadir, 'sda', '0'))
+            self.assertEquals(auditor_worker.quarantines,
+                              pre_quarantines + 1)
 
     def test_object_audit_no_meta(self):
         timestamp = str(normalize_timestamp(time.time()))

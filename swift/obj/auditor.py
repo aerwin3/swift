@@ -24,11 +24,39 @@ from eventlet import Timeout
 
 from swift.obj import diskfile
 from swift.common.utils import get_logger, ratelimit_sleep, dump_recon_cache, \
-    list_from_csv, json, listdir
+    list_from_csv, json, listdir, split_path
 from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist
 from swift.common.daemon import Daemon
+from swift.common.storage_policy import POLICIES
 
 SLEEP_BETWEEN_AUDITS = 30
+
+
+def verify_object_partition(df, metadata):
+    """
+    Compare the diskfile's on disk partition with the
+    partition stored in the object ring, if they do not match
+    raise a quarantine exception.
+
+    :param df: diskfile which partition is being verified.
+    :param metadata: object metadata that has been loaded from
+                     the diskfile.
+
+    :raises DiskFileQuarantined: if the disk files partition
+                                 does not match the object rings
+                                 partition.
+    """
+    pidx = diskfile.extract_policy_index(df._datadir)
+    policy = POLICIES.get_by_index(pidx)
+    obj_ring = policy.object_ring
+    acc, cont, obj = split_path(metadata['name'], maxsegs=3,
+                                rest_with_last=True)
+    obj_ring_part = str(obj_ring.get_part(acc, cont, obj))
+    if obj_ring_part != df.partition:
+        raise DiskFileQuarantined('Disk partition %s'
+                                  'does not match object '
+                                  'rings partition %s' % (df.partition,
+                                                          obj_ring_part))
 
 
 class AuditorWorker(object):
@@ -191,6 +219,7 @@ class AuditorWorker(object):
             with df.open():
                 metadata = df.get_metadata()
                 obj_size = int(metadata['Content-Length'])
+                verify_object_partition(df, metadata)
                 if self.stats_sizes:
                     self.record_stats(obj_size)
                 if self.zero_byte_only_at_fps and obj_size:
@@ -229,6 +258,10 @@ class ObjectAuditor(Daemon):
         self.recon_cache_path = conf.get('recon_cache_path',
                                          '/var/cache/swift')
         self.rcache = os.path.join(self.recon_cache_path, "object.recon")
+        swift_dir = conf.get('swift_dir', '/etc/swift')
+        # ensure rings are loaded for all configured storage policies
+        for policy in POLICIES:
+            policy.load_ring(swift_dir)
 
     def _sleep(self):
         time.sleep(SLEEP_BETWEEN_AUDITS)

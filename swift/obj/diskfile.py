@@ -1164,6 +1164,7 @@ class DiskFile(object):
         self._bytes_per_sync = mgr.bytes_per_sync
         self._use_splice = use_splice
         self._pipe_size = pipe_size
+        self.partition = partition
         if account and container and obj:
             self._name = '/' + '/'.join((account, container, obj))
             self._account = account
