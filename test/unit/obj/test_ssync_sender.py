@@ -25,6 +25,7 @@ import eventlet
 import mock
 
 from swift.common import exceptions, utils
+from swift.common.utils import Timestamp
 from swift.obj import ssync_sender, diskfile
 
 from test.unit import DebugLogger, patch_policies
@@ -825,7 +826,8 @@ class TestSender(unittest.TestCase):
 
     def test_send_delete(self):
         self.sender.connection = FakeConnection()
-        self.sender.send_delete('/a/c/o', '1381679759.90941')
+        timestamp = Timestamp('1381679759.90941')
+        self.sender.send_delete('/a/c/o', timestamp)
         self.assertEqual(
             ''.join(self.sender.connection.sent),
             '30\r\n'

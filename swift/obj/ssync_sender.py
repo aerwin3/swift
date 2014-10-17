@@ -17,6 +17,7 @@ import urllib
 from swift.common import bufferedhttp
 from swift.common import exceptions
 from swift.common import http
+from swift.common.utils import Timestamp
 
 
 class Sender(object):
@@ -274,6 +275,8 @@ class Sender(object):
         """
         Sends a DELETE subrequest with the given information.
         """
+        if isinstance(timestamp, Timestamp):
+            timestamp = timestamp.normal
         msg = ['DELETE ' + url_path, 'X-Timestamp: ' + timestamp]
         msg = '\r\n'.join(msg) + '\r\n\r\n'
         with exceptions.MessageTimeout(
