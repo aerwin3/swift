@@ -25,7 +25,8 @@ from eventlet.greenpool import GreenPool
 
 from swift.common.daemon import Daemon
 from swift.common.internal_client import InternalClient, UnexpectedResponse
-from swift.common.utils import get_logger, dump_recon_cache, split_path
+from swift.common.utils import get_logger, dump_recon_cache, \
+    split_path, list_from_csv
 from swift.common.http import HTTP_NOT_FOUND, HTTP_CONFLICT, \
     HTTP_PRECONDITION_FAILED
 
@@ -50,6 +51,8 @@ class ObjectExpirer(Daemon):
             (conf.get('auto_create_account_prefix') or '.') + \
             (conf.get('expiring_objects_account_name') or 'expiring_objects')
         conf_path = conf.get('__file__') or '/etc/swift/object-expirer.conf'
+        self.ignored_accts = list_from_csv(conf.get('ignored_accounts', ''))
+        self.focused_accts = list_from_csv(conf.get('focused_accounts', ''))
         request_tries = int(conf.get('request_tries') or 3)
         self.swift = swift or InternalClient(
             conf_path, 'Swift Object Expirer', request_tries)
@@ -106,6 +109,7 @@ class ObjectExpirer(Daemon):
                                              container):
                 obj = o['name'].encode('utf8')
                 timestamp, actual_obj = obj.split('-', 1)
+
                 timestamp = int(timestamp)
                 if timestamp > int(time()):
                     break
@@ -115,6 +119,14 @@ class ObjectExpirer(Daemon):
                     cache_key = '%s/%s' % (cust_account, cust_cont)
                 except ValueError:
                     cache_key = None
+
+                if self.focused_accts:
+                    if cust_account not in self.focused_accts:
+                        break
+
+                if self.ignored_accts:
+                    if cust_account in self.ignored_accts:
+                        break
 
                 if self.processes > 0:
                     obj_process = int(
