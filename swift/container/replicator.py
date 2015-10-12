@@ -186,6 +186,12 @@ class ContainerReplicator(db_replicator.Replicator):
             misplaced = broker.get_misplaced_since(point, self.per_diff)
         return low_sync
 
+    def _pre_replicate_hook(self, broker):
+        expired_count = broker.remove_expired_objects()
+        if expired_count:
+            self.logger.info("%s objects expired and removed." %
+                             expired_count)
+
     def _post_replicate_hook(self, broker, info, responses):
         if info['account'] == MISPLACED_OBJECTS_ACCOUNT:
             return

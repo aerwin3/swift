@@ -135,6 +135,20 @@ CONTAINER_STAT_VIEW_SCRIPT = '''
             reconciler_sync_point = NEW.reconciler_sync_point;
     END;
 '''
+CONTAINER_EXPIRED_SCRIPT = '''
+    CREATE TABLE expired (
+       obj_row_id INTEGER PRIMARY KEY,
+       expired_at INTEGER
+    );
+
+    CREATE INDEX ix_expired_expired_at
+    ON expired (expired_at);
+
+    CREATE TRIGGER object_delete_expired AFTER DELETE ON object
+    BEGIN
+        DELETE FROM expired WHERE obj_row_id = old.rowid;
+    END;
+'''
 
 
 class ContainerBroker(DatabaseBroker):
@@ -163,6 +177,7 @@ class ContainerBroker(DatabaseBroker):
         if storage_policy_index is None:
             storage_policy_index = 0
         self.create_object_table(conn)
+        self.create_expired_table(conn)
         self.create_policy_stat_table(conn, storage_policy_index)
         self.create_container_info_table(conn, put_timestamp,
                                          storage_policy_index)
@@ -194,6 +209,15 @@ class ContainerBroker(DatabaseBroker):
             END;
 
         """ + POLICY_STAT_TRIGGER_SCRIPT)
+
+    def create_expired_table(self, conn):
+        """
+        Create the expired table which is specific to the container DB.
+        Not a part of Pluggable Back-ends, internal to the baseline code.
+
+        :param conn: DB connection object
+        """
+        conn.executescript(CONTAINER_EXPIRED_SCRIPT)
 
     def create_container_info_table(self, conn, put_timestamp,
                                     storage_policy_index):
@@ -279,9 +303,10 @@ class ContainerBroker(DatabaseBroker):
     def _commit_puts_load(self, item_list, entry):
         """See :func:`swift.common.db.DatabaseBroker._commit_puts_load`"""
         data = pickle.loads(entry.decode('base64'))
-        (name, timestamp, size, content_type, etag, deleted) = data[:6]
-        if len(data) > 6:
-            storage_policy_index = data[6]
+        (name, timestamp, size, content_type,
+         etag, deleted, expired_at) = data[:7]
+        if len(data) > 7:
+            storage_policy_index = data[7]
         else:
             storage_policy_index = 0
         item_list.append({'name': name,
@@ -290,6 +315,7 @@ class ContainerBroker(DatabaseBroker):
                           'content_type': content_type,
                           'etag': etag,
                           'deleted': deleted,
+                          'expired_at': expired_at,
                           'storage_policy_index': storage_policy_index})
 
     def empty(self):
@@ -312,6 +338,22 @@ class ContainerBroker(DatabaseBroker):
                     'SELECT object_count from container_stat').fetchone()
             return (row[0] == 0)
 
+    def remove_expired_objects(self):
+        timestamp = int(time.time())
+        expired_count = 0
+        with self.get() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM object
+                WHERE rowid IN (
+                    SELECT obj_row_id
+                    FROM expired
+                    WHERE expired_at < %s
+                )''' % (timestamp))
+            expired_count = cursor.rowcount
+            conn.commit()
+        return expired_count
+
     def delete_object(self, name, timestamp, storage_policy_index=0):
         """
         Mark an object deleted.
@@ -325,10 +367,10 @@ class ContainerBroker(DatabaseBroker):
     def make_tuple_for_pickle(self, record):
         return (record['name'], record['created_at'], record['size'],
                 record['content_type'], record['etag'], record['deleted'],
-                record['storage_policy_index'])
+                record['expired_at'], record['storage_policy_index'])
 
     def put_object(self, name, timestamp, size, content_type, etag, deleted=0,
-                   storage_policy_index=0):
+                   expired_at=None, storage_policy_index=0):
         """
         Creates an object in the DB with its metadata.
 
@@ -340,10 +382,11 @@ class ContainerBroker(DatabaseBroker):
         :param deleted: if True, marks the object as deleted and sets the
                         deleted_at timestamp to timestamp
         :param storage_policy_index: the storage policy index for the object
+        :param expired_at: timestamp of when the object should expire
         """
         record = {'name': name, 'created_at': timestamp, 'size': size,
                   'content_type': content_type, 'etag': etag,
-                  'deleted': deleted,
+                  'deleted': deleted, 'expired_at': expired_at,
                   'storage_policy_index': storage_policy_index}
         self.put_record(record)
 
@@ -697,12 +740,22 @@ class ContainerBroker(DatabaseBroker):
 
         :param item_list: list of dictionaries of {'name', 'created_at',
                           'size', 'content_type', 'etag', 'deleted',
-                          'storage_policy_index'}
+                          'expired_at', 'storage_policy_index'}
         :param source: if defined, update incoming_sync with the source
         """
         for item in item_list:
             if isinstance(item['name'], six.text_type):
                 item['name'] = item['name'].encode('utf-8')
+
+        def _check_existance(item, ident, items):
+            # add latest entry to items
+            if ident in items:
+                items[ident] = max(item,
+                                   items[ident],
+                                   key=lambda i: i['created_at'])
+            else:
+                items[ident] = item
+            return items
 
         def _really_merge_items(conn):
             curs = conn.cursor()
@@ -722,35 +775,52 @@ class ContainerBroker(DatabaseBroker):
                         'SELECT name, storage_policy_index, created_at '
                         'FROM object WHERE ' + query_mod + ' name IN (%s)' %
                         ','.join('?' * len(chunk)), chunk))
+
             # Sort item_list into things that need adding and deleting, based
             # on results of created_at query.
             to_delete = {}
             to_add = {}
+            to_expired = {}
             for item in item_list:
                 item.setdefault('storage_policy_index', 0)  # legacy
                 item_ident = (item['name'], item['storage_policy_index'])
                 if created_at.get(item_ident) < item['created_at']:
                     if item_ident in created_at:  # exists with older timestamp
                         to_delete[item_ident] = item
-                    if item_ident in to_add:  # duplicate entries in item_list
-                        to_add[item_ident] = max(item, to_add[item_ident],
-                                                 key=lambda i: i['created_at'])
+                    if item.get('expired_at'):  # has an expired time
+                        to_expired = _check_existance(item,
+                                                      item_ident,
+                                                      to_expired)
                     else:
-                        to_add[item_ident] = item
+                        to_add = _check_existance(item,
+                                                  item_ident,
+                                                  to_add)
             if to_delete:
                 curs.executemany(
                     'DELETE FROM object WHERE ' + query_mod +
                     'name=? AND storage_policy_index=?',
                     ((rec['name'], rec['storage_policy_index'])
                      for rec in to_delete.itervalues()))
+            if to_expired:
+                for rec in to_expired.itervalues():
+                    curs.execute(
+                        'INSERT INTO object'
+                        '(name, created_at, size, content_type,'
+                        'etag, deleted, storage_policy_index)'
+                        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        ((rec['name'], rec['created_at'], rec['size'],
+                         rec['content_type'], rec['etag'],
+                         rec['deleted'], rec['storage_policy_index'])))
+                    curs.execute('INSERT INTO expired VALUES (?, ?)',
+                                 (curs.lastrowid, rec['expired_at']))
             if to_add:
                 curs.executemany(
                     'INSERT INTO object (name, created_at, size, content_type,'
                     'etag, deleted, storage_policy_index)'
                     'VALUES (?, ?, ?, ?, ?, ?, ?)',
                     ((rec['name'], rec['created_at'], rec['size'],
-                      rec['content_type'], rec['etag'], rec['deleted'],
-                      rec['storage_policy_index'])
+                      rec['content_type'], rec['etag'],
+                      rec['deleted'], rec['storage_policy_index'])
                      for rec in to_add.itervalues()))
             if source:
                 # for replication we rely on the remote end sending merges in
@@ -766,14 +836,17 @@ class ContainerBroker(DatabaseBroker):
                         VALUES (?, ?)
                     ''', (sync_point, source))
             conn.commit()
-
         with self.get() as conn:
             try:
                 return _really_merge_items(conn)
             except sqlite3.OperationalError as err:
-                if 'no such column: storage_policy_index' not in str(err):
+                if 'no such column: storage_policy_index' in str(err):
+                    self._migrate_add_storage_policy(conn)
+                elif 'no such table: expired' in str(err):
+                    conn.rollback()
+                    self._migrate_add_expired(conn)
+                else:
                     raise
-                self._migrate_add_storage_policy(conn)
                 return _really_merge_items(conn)
 
     def get_reconciler_sync(self):
@@ -844,6 +917,19 @@ class ContainerBroker(DatabaseBroker):
             ADD COLUMN x_container_sync_point2 INTEGER DEFAULT -1;
             COMMIT;
         ''')
+
+    def _migrate_add_expired(self, conn):
+        """
+        Migrate the container schema to support keeping track of
+        expired objects.
+
+         * create the 'expired' table
+         * add a 'object_delete_expired' trigger
+        """
+        try:
+            conn.executescript(CONTAINER_EXPIRED_SCRIPT)
+        except Exception:
+            raise
 
     def _migrate_add_storage_policy(self, conn):
         """

@@ -431,6 +431,101 @@ class TestContainerBroker(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT deleted FROM object").fetchone()[0], 0)
 
+    def test_remove_expired_objects(self):
+        # Test ContainerBroker.put_object
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+
+        # Create initial object
+        obj_name = 'obj_name'
+        timestamp = Timestamp(time())
+        broker.put_object(obj_name, timestamp.internal, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9afe',
+                          expired_at=int(timestamp))
+        broker.put_object('ob_name2', timestamp.internal, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9aff',
+                          expired_at=int(timestamp))
+        with broker.get() as conn:
+            objs = conn.execute('select * from expired').fetchall()
+            self.assertEqual(len(objs), 2)
+        sleep(1)
+        broker.remove_expired_objects()
+        with broker.get() as conn:
+            objs = conn.execute('select * from expired').fetchall()
+            self.assertEqual(len(objs), 0)
+            obj_count = conn.execute('select count(*) ' +
+                                     'from object').fetchone()[0]
+            self.assertEqual(obj_count, 0)
+
+    def test_expiring_object_input_and_deletion(self):
+        # Test ContainerBroker.put_object
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+
+        # Create initial object
+        obj_name = 'obj_name'
+        timestamp = Timestamp(time())
+        broker.put_object(obj_name, timestamp.internal, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9afe',
+                          expired_at=int(timestamp))
+        with broker.get() as conn:
+            # Check insert trigger
+            row = conn.execute("SELECT object.name, expired.expired_at " +
+                               "FROM object INNER JOIN expired ON " +
+                               "object.rowid = expired.obj_row_id").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row['name'], obj_name)
+            self.assertEqual(row['expired_at'], int(timestamp))
+            # Check delete trigger
+            conn.execute("DELETE FROM object where name='obj_name'")
+            rows = conn.execute("SELECT * FROM object").fetchall()
+            self.assertEqual(len(rows), 0)
+            rows = conn.execute("SELECT * FROM expired").fetchall()
+            self.assertEqual(len(rows), 0)
+
+    def test_expiring_object_migration(self):
+        # Test ContainerBroker.put_object
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+
+        # Create initial object
+        obj_name = 'obj_name'
+        timestamp = Timestamp(time())
+        broker.put_object(obj_name, timestamp.internal, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9afe',
+                          expired_at=int(timestamp) + 1)
+
+        broker.conn.execute('drop trigger object_delete_expired;')
+        broker.conn.execute('drop table expired;')
+        broker.conn.commit()
+
+        # Validate expired table is gone
+        with self.assertRaises(sqlite3.OperationalError):
+            broker.conn.execute('select * from expired')
+        cur_objs = broker.conn.execute('select * from object').fetchall()
+        self.assertEqual(len(cur_objs), 1)
+
+        timestamp = Timestamp(time())
+        broker.put_object('obj_2', timestamp.internal, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9aff',
+                          expired_at=int(timestamp) + 1)
+        objs = broker.conn.execute('''select name, expired.expired_at
+                                      from object left join expired on
+                                      object.rowid = expired.obj_row_id
+                                      ''').fetchall()
+        for obj in objs:
+            if obj['name'] == 'obj_name':
+                self.assertEqual(obj['expired_at'],
+                                 None)
+            if obj['name'] == 'obj_2':
+                self.assertEqual(obj['expired_at'],
+                                 int(timestamp) + 1)
+
     @patch_policies
     def test_put_misplaced_object_does_not_effect_container_stats(self):
         policy = random.choice(list(POLICIES))
@@ -1464,6 +1559,20 @@ class TestContainerBroker(unittest.TestCase):
         self.assertEqual(['a', 'b', 'c'],
                          sorted([rec['name'] for rec in items]))
 
+    def test_merge_items_expired_at_record(self):
+        broker1 = ContainerBroker(':memory:', account='a', container='c')
+        broker1.initialize(Timestamp('1').internal, 0)
+        name = 'test_obj'
+        broker1.put_object(name, Timestamp(2).internal, 0,
+                           'text/plain', 'd41d8cd98f00b204e9800998ecf8427e',
+                           expired_at=int(Timestamp(3)))
+        curs = broker1.conn.cursor()
+        item = curs.execute('''select name, expired.expired_at
+                            from object join expired on
+                            object.rowid = expired.obj_row_id
+                            where name = \'%s\';''' % name).fetchone()
+        self.assertEqual((name, 3), tuple(item))
+
     def test_merge_items_overwrite_unicode(self):
         # test DatabaseBroker.merge_items
         snowman = u'\N{SNOWMAN}'.encode('utf-8')
@@ -1651,7 +1760,7 @@ class TestContainerBroker(unittest.TestCase):
                     'o%s' % i, next(ts), 0, 'c', 'e', 0)
                 fp.write(':')
                 fp.write(pickle.dumps(
-                    (name, timestamp, size, content_type, etag, deleted),
+                    (name, timestamp, size, content_type, etag, deleted, None),
                     protocol=2).encode('base64'))
                 fp.flush()
 

@@ -98,6 +98,30 @@ class TestReplicatorSync(test_db_replicator.TestReplicatorSync):
         self.assertTrue(success)
         self.assertEqual(1, daemon.stats['no_change'])
 
+    def test_pre_replication_hook(self):
+        ts_iter = make_timestamp_iter()
+        # setup a local container
+        broker = self._get_broker('a', 'c', node_index=0)
+        put_timestamp = next(ts_iter)
+        broker.initialize(put_timestamp.internal, POLICIES.default.idx)
+        broker.update_metadata(
+            {'x-container-meta-test': ('foo', put_timestamp.internal)})
+        # setup remote container
+        remote_broker = self._get_broker('a', 'c', node_index=1)
+        remote_broker.initialize(next(ts_iter).internal, POLICIES.default.idx)
+        timestamp = next(ts_iter)
+        for db in (broker, remote_broker):
+            db.put_object(
+                '/a/c/o', timestamp.internal, 0, 'content-type', 'etag',
+                expired_at=int(put_timestamp),
+                storage_policy_index=db.storage_policy_index)
+        time.sleep(1)
+        daemon = replicator.ContainerReplicator({})
+        previous = broker.get_replication_info()
+        daemon._pre_replicate_hook(broker)
+        after = broker.get_replication_info()
+        self.assertEqual(previous['count'] - after['count'], 1)
+
     def test_sync_remote_with_timings(self):
         ts_iter = make_timestamp_iter()
         # setup a local container

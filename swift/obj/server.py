@@ -31,8 +31,7 @@ from eventlet.greenthread import spawn
 
 from swift.common.utils import public, get_logger, \
     config_true_value, timing_stats, replication, \
-    normalize_delete_at_timestamp, get_log_line, Timestamp, \
-    get_expirer_container, parse_mime_headers, \
+    get_log_line, Timestamp, parse_mime_headers, \
     iter_multipart_mime_documents
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, \
@@ -317,80 +316,6 @@ class ObjectController(BaseStorageServer):
                 'Container update timeout (%.4fs) waiting for %s',
                 self.container_update_timeout, updates)
 
-    def delete_at_update(self, op, delete_at, account, container, obj,
-                         request, objdevice, policy):
-        """
-        Update the expiring objects container when objects are updated.
-
-        :param op: operation performed (ex: 'PUT', or 'DELETE')
-        :param delete_at: scheduled delete in UNIX seconds, int
-        :param account: account name for the object
-        :param container: container name for the object
-        :param obj: object name
-        :param request: the original request driving the update
-        :param objdevice: device name that the object is in
-        :param policy: the BaseStoragePolicy instance (used for tmp dir)
-        """
-        if config_true_value(
-                request.headers.get('x-backend-replication', 'f')):
-            return
-        delete_at = normalize_delete_at_timestamp(delete_at)
-        updates = [(None, None)]
-
-        partition = None
-        hosts = contdevices = [None]
-        headers_in = request.headers
-        headers_out = HeaderKeyDict({
-            # system accounts are always Policy-0
-            'X-Backend-Storage-Policy-Index': 0,
-            'x-timestamp': request.timestamp.internal,
-            'x-trans-id': headers_in.get('x-trans-id', '-'),
-            'referer': request.as_referer()})
-        if op != 'DELETE':
-            delete_at_container = headers_in.get('X-Delete-At-Container', None)
-            if not delete_at_container:
-                self.logger.warning(
-                    'X-Delete-At-Container header must be specified for '
-                    'expiring objects background %s to work properly. Making '
-                    'best guess as to the container name for now.' % op)
-                # TODO(gholt): In a future release, change the above warning to
-                # a raised exception and remove the guess code below.
-                delete_at_container = get_expirer_container(
-                    delete_at, self.expiring_objects_container_divisor,
-                    account, container, obj)
-            partition = headers_in.get('X-Delete-At-Partition', None)
-            hosts = headers_in.get('X-Delete-At-Host', '')
-            contdevices = headers_in.get('X-Delete-At-Device', '')
-            updates = [upd for upd in
-                       zip((h.strip() for h in hosts.split(',')),
-                           (c.strip() for c in contdevices.split(',')))
-                       if all(upd) and partition]
-            if not updates:
-                updates = [(None, None)]
-            headers_out['x-size'] = '0'
-            headers_out['x-content-type'] = 'text/plain'
-            headers_out['x-etag'] = 'd41d8cd98f00b204e9800998ecf8427e'
-        else:
-            # DELETEs of old expiration data have no way of knowing what the
-            # old X-Delete-At-Container was at the time of the initial setting
-            # of the data, so a best guess is made here.
-            # Worst case is a DELETE is issued now for something that doesn't
-            # exist there and the original data is left where it is, where
-            # it will be ignored when the expirer eventually tries to issue the
-            # object DELETE later since the X-Delete-At value won't match up.
-            delete_at_container = get_expirer_container(
-                delete_at, self.expiring_objects_container_divisor,
-                account, container, obj)
-        delete_at_container = normalize_delete_at_timestamp(
-            delete_at_container)
-
-        for host, contdevice in updates:
-            self.async_update(
-                op, self.expiring_objects_account, delete_at_container,
-                '%s-%s/%s/%s' % (delete_at, account, container, obj),
-                host, partition, contdevice, headers_out, objdevice,
-                policy)
-
     def _make_timeout_reader(self, file_like):
         def timeout_reader():
             with ChunkReadTimeout(self.client_timeout):
@@ -495,15 +420,16 @@ class ObjectController(BaseStorageServer):
             if header_key in request.headers:
                 header_caps = header_key.title()
                 metadata[header_caps] = request.headers[header_key]
+        # If the X-Deleted-At changes notify the container server
         orig_delete_at = int(orig_metadata.get('X-Delete-At') or 0)
         if orig_delete_at != new_delete_at:
+            update_headers = HeaderKeyDict({'x-timestamp':
+                                            metadata['X-Timestamp']})
             if new_delete_at:
-                self.delete_at_update('PUT', new_delete_at, account, container,
-                                      obj, request, device, policy)
-            if orig_delete_at:
-                self.delete_at_update('DELETE', orig_delete_at, account,
-                                      container, obj, request, device,
-                                      policy)
+                update_headers['x-delete-at'] = new_delete_at
+            self.container_update(
+                'PUT', account, container, obj, request,
+                update_headers, device, policy)
         try:
             disk_file.write_metadata(metadata)
         except (DiskFileXattrNotSupported, DiskFileNoSpace):
@@ -706,27 +632,21 @@ class ObjectController(BaseStorageServer):
 
         except (DiskFileXattrNotSupported, DiskFileNoSpace):
             return HTTPInsufficientStorage(drive=device, request=request)
-        if orig_delete_at != new_delete_at:
-            if new_delete_at:
-                self.delete_at_update(
-                    'PUT', new_delete_at, account, container, obj, request,
-                    device, policy)
-            if orig_delete_at:
-                self.delete_at_update(
-                    'DELETE', orig_delete_at, account, container, obj,
-                    request, device, policy)
         update_headers = HeaderKeyDict({
             'x-size': metadata['Content-Length'],
             'x-content-type': metadata['Content-Type'],
             'x-timestamp': metadata['X-Timestamp'],
             'x-etag': metadata['ETag']})
+        if orig_delete_at != new_delete_at:
+            if new_delete_at:
+                update_headers['x-delete-at'] = new_delete_at
+
         # apply any container update header overrides sent with request
         self._check_container_override(update_headers, request.headers)
         self._check_container_override(update_headers, footer_meta)
         self.container_update(
             'PUT', account, container, obj, request,
-            update_headers,
-            device, policy)
+            update_headers, device, policy)
         return HTTPCreated(request=request, etag=etag)
 
     @public
@@ -890,10 +810,6 @@ class ObjectController(BaseStorageServer):
             else:
                 # differentiate success from no object at all
                 response_class = HTTPNoContent
-        if orig_delete_at:
-            self.delete_at_update('DELETE', orig_delete_at, account,
-                                  container, obj, request, device,
-                                  policy)
         if orig_timestamp < req_timestamp:
             try:
                 disk_file.delete(req_timestamp)

@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import os
 import sys
 import time
 import signal
+
 from random import shuffle
 from swift import gettext_ as _
 from contextlib import closing
@@ -25,8 +25,9 @@ from eventlet import Timeout
 
 from swift.obj import diskfile
 from swift.common.utils import get_logger, ratelimit_sleep, dump_recon_cache, \
-    list_from_csv, listdir
-from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist
+    list_from_csv, json, listdir, normalize_timestamp
+from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist, \
+    DiskFileExpired
 from swift.common.daemon import Daemon
 
 SLEEP_BETWEEN_AUDITS = 30
@@ -57,6 +58,7 @@ class AuditorWorker(object):
         self.total_files_processed = 0
         self.passes = 0
         self.quarantines = 0
+        self.expired = 0
         self.errors = 0
         self.rcache = rcache
         self.stats_sizes = sorted(
@@ -85,6 +87,7 @@ class AuditorWorker(object):
         self.total_bytes_processed = 0
         self.total_files_processed = 0
         total_quarantines = 0
+        total_expired = 0
         total_errors = 0
         time_auditing = 0
         all_locs = self.diskfile_mgr.object_audit_location_generator(
@@ -101,14 +104,15 @@ class AuditorWorker(object):
                 self.logger.info(_(
                     'Object audit (%(type)s). '
                     'Since %(start_time)s: Locally: %(passes)d passed, '
-                    '%(quars)d quarantined, %(errors)d errors '
+                    '%(quars)d quarantined, %(errors)d errors, '
+                    '%(expired)d expired, '
                     'files/sec: %(frate).2f , bytes/sec: %(brate).2f, '
                     'Total time: %(total).2f, Auditing time: %(audit).2f, '
                     'Rate: %(audit_rate).2f') % {
                         'type': '%s%s' % (self.auditor_type, description),
                         'start_time': time.ctime(reported),
                         'passes': self.passes, 'quars': self.quarantines,
-                        'errors': self.errors,
+                        'expired': self.expired, 'errors': self.errors,
                         'frate': self.passes / (now - reported),
                         'brate': self.bytes_processed / (now - reported),
                         'total': (now - begin), 'audit': time_auditing,
@@ -118,14 +122,17 @@ class AuditorWorker(object):
                     device_dirs,
                     {'errors': self.errors, 'passes': self.passes,
                      'quarantined': self.quarantines,
+                     'expired': self.expired,
                      'bytes_processed': self.bytes_processed,
                      'start_time': reported, 'audit_time': time_auditing})
                 dump_recon_cache(cache_entry, self.rcache, self.logger)
                 reported = now
                 total_quarantines += self.quarantines
+                total_expired += self.expired
                 total_errors += self.errors
                 self.passes = 0
                 self.quarantines = 0
+                self.expired = 0
                 self.errors = 0
                 self.bytes_processed = 0
                 self.last_logged = now
@@ -135,12 +142,14 @@ class AuditorWorker(object):
         self.logger.info(_(
             'Object audit (%(type)s) "%(mode)s" mode '
             'completed: %(elapsed).02fs. Total quarantined: %(quars)d, '
+            'Total expired: %(expired)d, '
             'Total errors: %(errors)d, Total files/sec: %(frate).2f, '
             'Total bytes/sec: %(brate).2f, Auditing time: %(audit).2f, '
             'Rate: %(audit_rate).2f') % {
                 'type': '%s%s' % (self.auditor_type, description),
                 'mode': mode, 'elapsed': elapsed,
                 'quars': total_quarantines + self.quarantines,
+                'expired': total_expired + self.expired,
                 'errors': total_errors + self.errors,
                 'frate': self.total_files_processed / elapsed,
                 'brate': self.total_bytes_processed / elapsed,
@@ -170,6 +179,7 @@ class AuditorWorker(object):
         """
         Entrypoint to object_audit, with a failsafe generic exception handler.
         """
+
         try:
             self.object_audit(location)
         except (Exception, Timeout):
@@ -207,6 +217,12 @@ class AuditorWorker(object):
                         incr_by=chunk_len)
                     self.bytes_processed += chunk_len
                     self.total_bytes_processed += chunk_len
+        except DiskFileExpired as dfe:
+            delete_at = normalize_timestamp(dfe.metadata['X-Delete-At'])
+            df = self.diskfile_mgr.get_diskfile_from_audit_location(location)
+            df.delete(delete_at)
+            self.expired += 1
+            return
         except DiskFileNotExist:
             return
         except DiskFileQuarantined as err:
