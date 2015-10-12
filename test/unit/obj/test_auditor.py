@@ -70,6 +70,7 @@ class TestAuditor(unittest.TestCase):
             devices=self.devices,
             mount_check='false',
             object_size_stats='10,100,1024,10240')
+            
         self.df_mgr = DiskFileManager(self.conf, self.logger)
 
         # diskfiles for policy 0, 1
@@ -430,7 +431,33 @@ class TestAuditor(unittest.TestCase):
         del(kwargs['zero_byte_fps'])
         self.auditor.run_audit(**kwargs)
         self.assertTrue(os.path.isdir(quarantine_path))
+    
+    def test_object_run_delete_expired_object(self):
+        self.auditor = auditor.ObjectAuditor(self.conf)
+        self.auditor.log_time = 0
+        data = '0' * 1024
+        etag = md5()
+        with self.disk_file.create() as writer:
+            writer.write(data)
+            etag.update(data)
+            etag = etag.hexdigest()
+            metadata = {
+                'ETag': etag,
+                'X-Timestamp': str(normalize_timestamp(time.time())),
+                'X-Delete-At': str(int(time.time())-1),
+                'Content-Length': str(os.fstat(writer._fd).st_size),
+            }
+            writer.put(metadata)
+            etag = md5()
+            etag.update('1' + '0' * 1023)
+            etag = etag.hexdigest()
+            metadata['ETag'] = etag
 
+        kwargs = {'mode': 'once'}
+        kwargs['zero_byte_fps'] = 50
+        self.auditor.run_audit(**kwargs)
+        self.assertTrue(".ts" in os.listdir(self.disk_file._datadir)[0])
+        
     def setup_bad_zero_byte(self, timestamp=None):
         if timestamp is None:
             timestamp = Timestamp(time.time())

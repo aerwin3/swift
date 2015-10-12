@@ -1662,7 +1662,7 @@ class BaseDiskFile(object):
                 data_file, "bad metadata x-delete-at value %s" % (
                     self._metadata['X-Delete-At']))
         else:
-            if x_delete_at <= time.time():
+            if x_delete_at <= int(time.time()):
                 raise DiskFileExpired(metadata=self._metadata)
         try:
             metadata_size = int(self._metadata['Content-Length'])
