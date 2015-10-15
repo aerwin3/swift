@@ -163,6 +163,7 @@ class ContainerBroker(DatabaseBroker):
         if storage_policy_index is None:
             storage_policy_index = 0
         self.create_object_table(conn)
+        self.create_expired_table(conn)
         self.create_policy_stat_table(conn, storage_policy_index)
         self.create_container_info_table(conn, put_timestamp,
                                          storage_policy_index)
@@ -179,6 +180,7 @@ class ContainerBroker(DatabaseBroker):
                 ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT,
                 created_at TEXT,
+                expired_at TEXT,
                 size INTEGER,
                 content_type TEXT,
                 etag TEXT,
@@ -193,7 +195,42 @@ class ContainerBroker(DatabaseBroker):
                 SELECT RAISE(FAIL, 'UPDATE not allowed; DELETE and INSERT');
             END;
 
+            CREATE TRIGGER expired_insert AFTER INSERT ON object
+            WHEN new.expired_at NOT NULL 
+            BEGIN 
+                INSERT INTO expired (obj_row_id, expired_at)
+                VALUES ((select last_insert_rowid()),
+                        new.expired_at);
+            END;
+            
+            CREATE TRIGGER expired_delete AFTER DELETE ON object
+            BEGIN
+                DELETE FROM expired where obj_row_id = new.rowid;
+            END;
+
         """ + POLICY_STAT_TRIGGER_SCRIPT)
+
+    def create_expired_table(self, conn):
+        """
+        Create the expired table which is specific to the container DB.
+        Not a part of Pluggable Back-ends, internal to the baseline code.
+
+        :param conn: DB connection object
+        """
+        conn.executescript("""
+            CREATE TABLE expired (
+               obj_row_id INTEGER PRIMARY KEY,
+               expired_at TEXT
+            );
+
+            CREATE INDEX ix_expired_expired_at
+            ON expired (expired_at);
+
+            CREATE TRIGGER expired_object_delete BEFORE DELETE ON expired
+            BEGIN 
+                DELETE FROM expired where obj_row_id = new.rowid;
+            END;
+        """)
 
     def create_container_info_table(self, conn, put_timestamp,
                                     storage_policy_index):
