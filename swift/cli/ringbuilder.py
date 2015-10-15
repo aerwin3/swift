@@ -18,7 +18,7 @@ from __future__ import print_function
 import logging
 
 from errno import EEXIST
-from itertools import islice, izip
+from itertools import islice
 from operator import itemgetter
 from os import mkdir
 from os.path import basename, abspath, dirname, exists, join as pathjoin
@@ -27,6 +27,8 @@ from textwrap import wrap
 from time import time
 import optparse
 import math
+
+from six.moves import zip as izip
 from six.moves import input
 
 from swift.common import exceptions
@@ -1005,6 +1007,8 @@ swift-ring-builder <ring_file> write_builder [min_part_hours]
             min_part_hours = 24
         ring = Ring(ring_file)
         for dev in ring.devs:
+            if dev is None:
+                continue
             dev.update({
                 'parts': 0,
                 'parts_wanted': 0,
@@ -1188,12 +1192,12 @@ def main(arguments=None):
     if argv[0].endswith('-safe'):
         try:
             with lock_parent_directory(abspath(builder_file), 15):
-                Commands.__dict__.get(command, Commands.unknown.im_func)()
+                Commands.__dict__.get(command, Commands.unknown.__func__)()
         except exceptions.LockTimeout:
             print("Ring/builder dir currently locked.")
             exit(2)
     else:
-        Commands.__dict__.get(command, Commands.unknown.im_func)()
+        Commands.__dict__.get(command, Commands.unknown.__func__)()
 
 
 if __name__ == '__main__':
