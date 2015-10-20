@@ -196,7 +196,7 @@ class ContainerBroker(DatabaseBroker):
             END;
 
             CREATE TRIGGER expired_insert AFTER INSERT ON object
-            WHEN new.expired_at NOT NULL 
+            WHEN new.expired_at NOT NULL
             BEGIN 
                 INSERT INTO expired (obj_row_id, expired_at)
                 VALUES ((select last_insert_rowid()),
@@ -205,7 +205,7 @@ class ContainerBroker(DatabaseBroker):
             
             CREATE TRIGGER expired_delete AFTER DELETE ON object
             BEGIN
-                DELETE FROM expired where obj_row_id = new.rowid;
+                DELETE FROM expired where obj_row_id = old.rowid;
             END;
 
         """ + POLICY_STAT_TRIGGER_SCRIPT)
@@ -228,7 +228,7 @@ class ContainerBroker(DatabaseBroker):
 
             CREATE TRIGGER expired_object_delete BEFORE DELETE ON expired
             BEGIN 
-                DELETE FROM expired where obj_row_id = new.rowid;
+                DELETE FROM object where rowid = old.obj_row_id;
             END;
         """)
 
@@ -365,7 +365,7 @@ class ContainerBroker(DatabaseBroker):
                 record['storage_policy_index'])
 
     def put_object(self, name, timestamp, size, content_type, etag, deleted=0,
-                   storage_policy_index=0):
+                   storage_policy_index=0, expired_at=None):
         """
         Creates an object in the DB with its metadata.
 
@@ -380,7 +380,7 @@ class ContainerBroker(DatabaseBroker):
         """
         record = {'name': name, 'created_at': timestamp, 'size': size,
                   'content_type': content_type, 'etag': etag,
-                  'deleted': deleted,
+                  'deleted': deleted,'expired_at': expired_at,
                   'storage_policy_index': storage_policy_index}
         self.put_record(record)
 
@@ -719,8 +719,8 @@ class ContainerBroker(DatabaseBroker):
         Merge items into the object table.
 
         :param item_list: list of dictionaries of {'name', 'created_at',
-                          'size', 'content_type', 'etag', 'deleted',
-                          'storage_policy_index'}
+                          'expired_at', 'size', 'content_type', 'etag',
+                          'deleted', 'storage_policy_index'}
         :param source: if defined, update incoming_sync with the source
         """
         for item in item_list:
@@ -768,12 +768,12 @@ class ContainerBroker(DatabaseBroker):
                      for rec in to_delete.itervalues()))
             if to_add:
                 curs.executemany(
-                    'INSERT INTO object (name, created_at, size, content_type,'
+                    'INSERT INTO object (name, created_at, expired_at, size, content_type,'
                     'etag, deleted, storage_policy_index)'
-                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                    ((rec['name'], rec['created_at'], rec['size'],
-                      rec['content_type'], rec['etag'], rec['deleted'],
-                      rec['storage_policy_index'])
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    ((rec['name'], rec['created_at'], rec['expired_at'],
+                      rec['size'], rec['content_type'], rec['etag'],
+                      rec['deleted'], rec['storage_policy_index'])
                      for rec in to_add.itervalues()))
             if source:
                 # for replication we rely on the remote end sending merges in

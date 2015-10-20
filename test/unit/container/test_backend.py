@@ -430,6 +430,44 @@ class TestContainerBroker(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT deleted FROM object").fetchone()[0], 0)
 
+    def test_expiring_object_triggers(self):
+        # Test ContainerBroker.put_object
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+
+        # Create initial object
+        obj_name = 'obj_name'
+        timestamp = Timestamp(time()).internal
+        broker.put_object(obj_name, timestamp, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9afe',
+                          expired_at=timestamp)
+        with broker.get() as conn:
+            #check insert trigger
+            row  = conn.execute("SELECT object.name, expired.expired_at "+
+                                "FROM object INNER JOIN expired ON "+
+                                "object.rowid = expired.obj_row_id").fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row['name'], obj_name)
+            self.assertEqual(row['expired_at'], timestamp)
+            #check delete trigger
+            conn.execute("DELETE FROM object where name='obj_name'")
+            rows = conn.execute("SELECT * FROM object").fetchall()
+            self.assertEqual(len(rows), 0)
+            rows = conn.execute("SELECT * FROM expired").fetchall()
+            self.assertEqual(len(rows), 0)
+
+        #Test delete from the expired table
+        broker.put_object(obj_name, timestamp, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9afe',
+                          expired_at=timestamp)
+        with broker.get() as conn:
+            conn.execute("DELETE FROM expired")
+            rows = conn.execute("SELECT * FROM object").fetchall()
+            self.assertEqual(len(rows), 0)
+
+
     @patch_policies
     def test_put_misplaced_object_does_not_effect_container_stats(self):
         policy = random.choice(list(POLICIES))
