@@ -430,7 +430,7 @@ class TestContainerBroker(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT deleted FROM object").fetchone()[0], 0)
 
-    def test_expiring_object_triggers(self):
+    def test_expiring_object_input_and_deletion(self):
         # Test ContainerBroker.put_object
         broker = ContainerBroker(':memory:', account='a', container='c')
         broker.initialize(Timestamp('1').internal, 0)
@@ -443,30 +443,19 @@ class TestContainerBroker(unittest.TestCase):
                           '5af83e3196bf99f440f31f2e1a6c9afe',
                           expired_at=timestamp)
         with broker.get() as conn:
-            #check insert trigger
-            row  = conn.execute("SELECT object.name, expired.expired_at "+
-                                "FROM object INNER JOIN expired ON "+
-                                "object.rowid = expired.obj_row_id").fetchone()
+            # Check insert trigger
+            row = conn.execute("SELECT object.name, expired.expired_at " +
+                               "FROM object INNER JOIN expired ON " +
+                               "object.rowid = expired.obj_row_id").fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row['name'], obj_name)
             self.assertEqual(row['expired_at'], timestamp)
-            #check delete trigger
+            # Check delete trigger
             conn.execute("DELETE FROM object where name='obj_name'")
             rows = conn.execute("SELECT * FROM object").fetchall()
             self.assertEqual(len(rows), 0)
             rows = conn.execute("SELECT * FROM expired").fetchall()
             self.assertEqual(len(rows), 0)
-
-        #Test delete from the expired table
-        broker.put_object(obj_name, timestamp, 123,
-                          'application/x-test',
-                          '5af83e3196bf99f440f31f2e1a6c9afe',
-                          expired_at=timestamp)
-        with broker.get() as conn:
-            conn.execute("DELETE FROM expired")
-            rows = conn.execute("SELECT * FROM object").fetchall()
-            self.assertEqual(len(rows), 0)
-
 
     @patch_policies
     def test_put_misplaced_object_does_not_effect_container_stats(self):
@@ -1466,7 +1455,7 @@ class TestContainerBroker(unittest.TestCase):
                     'o%s' % i, next(ts), 0, 'c', 'e', 0)
                 fp.write(':')
                 fp.write(pickle.dumps(
-                    (name, timestamp, size, content_type, etag, deleted),
+                    (name, timestamp, size, content_type, etag, deleted, None),
                     protocol=2).encode('base64'))
                 fp.flush()
 

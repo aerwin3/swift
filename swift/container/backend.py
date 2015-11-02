@@ -180,7 +180,6 @@ class ContainerBroker(DatabaseBroker):
                 ROWID INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT,
                 created_at TEXT,
-                expired_at TEXT,
                 size INTEGER,
                 content_type TEXT,
                 etag TEXT,
@@ -193,19 +192,6 @@ class ContainerBroker(DatabaseBroker):
             CREATE TRIGGER object_update BEFORE UPDATE ON object
             BEGIN
                 SELECT RAISE(FAIL, 'UPDATE not allowed; DELETE and INSERT');
-            END;
-
-            CREATE TRIGGER expired_insert AFTER INSERT ON object
-            WHEN new.expired_at NOT NULL
-            BEGIN 
-                INSERT INTO expired (obj_row_id, expired_at)
-                VALUES ((select last_insert_rowid()),
-                        new.expired_at);
-            END;
-            
-            CREATE TRIGGER expired_delete AFTER DELETE ON object
-            BEGIN
-                DELETE FROM expired where obj_row_id = old.rowid;
             END;
 
         """ + POLICY_STAT_TRIGGER_SCRIPT)
@@ -226,9 +212,9 @@ class ContainerBroker(DatabaseBroker):
             CREATE INDEX ix_expired_expired_at
             ON expired (expired_at);
 
-            CREATE TRIGGER expired_object_delete BEFORE DELETE ON expired
-            BEGIN 
-                DELETE FROM object where rowid = old.obj_row_id;
+            CREATE TRIGGER object_delete_expired AFTER DELETE ON object
+            BEGIN
+                DELETE FROM expired WHERE obj_row_id = old.rowid;
             END;
         """)
 
@@ -316,9 +302,10 @@ class ContainerBroker(DatabaseBroker):
     def _commit_puts_load(self, item_list, entry):
         """See :func:`swift.common.db.DatabaseBroker._commit_puts_load`"""
         data = pickle.loads(entry.decode('base64'))
-        (name, timestamp, size, content_type, etag, deleted) = data[:6]
-        if len(data) > 6:
-            storage_policy_index = data[6]
+        (name, timestamp, size, content_type,
+         etag, deleted, expired_at) = data[:7]
+        if len(data) > 7:
+            storage_policy_index = data[7]
         else:
             storage_policy_index = 0
         item_list.append({'name': name,
@@ -327,6 +314,7 @@ class ContainerBroker(DatabaseBroker):
                           'content_type': content_type,
                           'etag': etag,
                           'deleted': deleted,
+                          'expired_at': expired_at,
                           'storage_policy_index': storage_policy_index})
 
     def empty(self):
@@ -362,10 +350,10 @@ class ContainerBroker(DatabaseBroker):
     def make_tuple_for_pickle(self, record):
         return (record['name'], record['created_at'], record['size'],
                 record['content_type'], record['etag'], record['deleted'],
-                record['storage_policy_index'])
+                record['expired_at'], record['storage_policy_index'])
 
     def put_object(self, name, timestamp, size, content_type, etag, deleted=0,
-                   storage_policy_index=0, expired_at=None):
+                   expired_at=None, storage_policy_index=0):
         """
         Creates an object in the DB with its metadata.
 
@@ -377,10 +365,11 @@ class ContainerBroker(DatabaseBroker):
         :param deleted: if True, marks the object as deleted and sets the
                         deleted_at timestamp to timestamp
         :param storage_policy_index: the storage policy index for the object
+        :param expired_at: timestamp of when the object should expire
         """
         record = {'name': name, 'created_at': timestamp, 'size': size,
                   'content_type': content_type, 'etag': etag,
-                  'deleted': deleted,'expired_at': expired_at,
+                  'deleted': deleted, 'expired_at': expired_at,
                   'storage_policy_index': storage_policy_index}
         self.put_record(record)
 
@@ -719,7 +708,7 @@ class ContainerBroker(DatabaseBroker):
         Merge items into the object table.
 
         :param item_list: list of dictionaries of {'name', 'created_at',
-                          'expired_at', 'size', 'content_type', 'etag',
+                          'size', 'content_type', 'etag',
                           'deleted', 'storage_policy_index'}
         :param source: if defined, update incoming_sync with the source
         """
@@ -768,13 +757,24 @@ class ContainerBroker(DatabaseBroker):
                      for rec in to_delete.itervalues()))
             if to_add:
                 curs.executemany(
-                    'INSERT INTO object (name, created_at, expired_at, size, content_type,'
+                    'INSERT INTO object (name, created_at, size, content_type,'
                     'etag, deleted, storage_policy_index)'
-                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                    ((rec['name'], rec['created_at'], rec['expired_at'],
-                      rec['size'], rec['content_type'], rec['etag'],
+                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    ((rec['name'], rec['created_at'], rec['size'],
+                      rec['content_type'], rec['etag'],
                       rec['deleted'], rec['storage_policy_index'])
                      for rec in to_add.itervalues()))
+                # Adding expired rows for the object inserts
+                for rec in to_add.itervalues():
+                    if rec.get('expired_at'):
+                        query = curs.execute('SELECT rowid FROM object ' +
+                                             'WHERE name=:name and ' +
+                                             'deleted=:deleted',
+                                             {'name': rec['name'],
+                                              'deleted': rec['deleted']})
+                        rowid = query.fetchone()[0]
+                        curs.execute('INSERT INTO expired VALUES (?, ?)',
+                                     (rowid, rec['expired_at']))
             if source:
                 # for replication we rely on the remote end sending merges in
                 # order with no gaps to increment sync_points

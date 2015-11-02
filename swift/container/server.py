@@ -351,11 +351,14 @@ class ContainerController(BaseStorageServer):
                     pass
             if not os.path.exists(broker.db_file):
                 return HTTPNotFound()
+            # Expired objects handling
+            expired_at = req.headers.get('x-delete-at')
+                
             broker.put_object(obj, req_timestamp.internal,
                               int(req.headers['x-size']),
                               req.headers['x-content-type'],
                               req.headers['x-etag'], 0,
-                              obj_policy_index)
+                              expired_at, obj_policy_index)
             return HTTPCreated(request=req)
         else:   # put container
             if requested_policy_index is None:

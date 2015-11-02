@@ -3182,127 +3182,6 @@ class TestObjectController(unittest.TestCase):
 
     @patch_policies([StoragePolicy(0, 'zero', True),
                      StoragePolicy(1, 'one'),
-                     StoragePolicy(37, 'fantastico')])
-    def test_updating_multiple_delete_at_container_servers(self):
-        # update router post patch
-        self.object_controller._diskfile_router = diskfile.DiskFileRouter(
-            self.conf, self.object_controller.logger)
-        policy = random.choice(list(POLICIES))
-        self.object_controller.expiring_objects_account = 'exp'
-        self.object_controller.expiring_objects_container_divisor = 60
-
-        http_connect_args = []
-
-        def fake_http_connect(ipaddr, port, device, partition, method, path,
-                              headers=None, query_string=None, ssl=False):
-
-            class SuccessfulFakeConn(object):
-
-                @property
-                def status(self):
-                    return 200
-
-                def getresponse(self):
-                    return self
-
-                def read(self):
-                    return ''
-
-            captured_args = {'ipaddr': ipaddr, 'port': port,
-                             'device': device, 'partition': partition,
-                             'method': method, 'path': path, 'ssl': ssl,
-                             'headers': headers, 'query_string': query_string}
-
-            http_connect_args.append(
-                dict((k, v) for k, v in captured_args.items()
-                     if v is not None))
-
-            return SuccessfulFakeConn()
-
-        req = Request.blank(
-            '/sda1/p/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': '12345',
-                     'Content-Type': 'application/burrito',
-                     'Content-Length': '0',
-                     'X-Backend-Storage-Policy-Index': int(policy),
-                     'X-Container-Partition': '20',
-                     'X-Container-Host': '1.2.3.4:5',
-                     'X-Container-Device': 'sdb1',
-                     'X-Delete-At': 9999999999,
-                     'X-Delete-At-Container': '9999999960',
-                     'X-Delete-At-Host': "10.1.1.1:6001,10.2.2.2:6002",
-                     'X-Delete-At-Partition': '6237',
-                     'X-Delete-At-Device': 'sdp,sdq'})
-
-        with fake_spawn(), mock.patch.object(
-                object_server, 'http_connect', fake_http_connect):
-            resp = req.get_response(self.object_controller)
-
-        self.assertEqual(resp.status_int, 201)
-
-        http_connect_args.sort(key=operator.itemgetter('ipaddr'))
-
-        self.assertEqual(len(http_connect_args), 3)
-        self.assertEqual(
-            http_connect_args[0],
-            {'ipaddr': '1.2.3.4',
-             'port': '5',
-             'path': '/a/c/o',
-             'device': 'sdb1',
-             'partition': '20',
-             'method': 'PUT',
-             'ssl': False,
-             'headers': HeaderKeyDict({
-                 'x-content-type': 'application/burrito',
-                 'x-etag': 'd41d8cd98f00b204e9800998ecf8427e',
-                 'x-size': '0',
-                 'x-timestamp': utils.Timestamp('12345').internal,
-                 'referer': 'PUT http://localhost/sda1/p/a/c/o',
-                 'user-agent': 'object-server %d' % os.getpid(),
-                 'X-Backend-Storage-Policy-Index': int(policy),
-                 'x-trans-id': '-'})})
-        self.assertEqual(
-            http_connect_args[1],
-            {'ipaddr': '10.1.1.1',
-             'port': '6001',
-             'path': '/exp/9999999960/9999999999-a/c/o',
-             'device': 'sdp',
-             'partition': '6237',
-             'method': 'PUT',
-             'ssl': False,
-             'headers': HeaderKeyDict({
-                 'x-content-type': 'text/plain',
-                 'x-etag': 'd41d8cd98f00b204e9800998ecf8427e',
-                 'x-size': '0',
-                 'x-timestamp': utils.Timestamp('12345').internal,
-                 'referer': 'PUT http://localhost/sda1/p/a/c/o',
-                 'user-agent': 'object-server %d' % os.getpid(),
-                 # system account storage policy is 0
-                 'X-Backend-Storage-Policy-Index': 0,
-                 'x-trans-id': '-'})})
-        self.assertEqual(
-            http_connect_args[2],
-            {'ipaddr': '10.2.2.2',
-             'port': '6002',
-             'path': '/exp/9999999960/9999999999-a/c/o',
-             'device': 'sdq',
-             'partition': '6237',
-             'method': 'PUT',
-             'ssl': False,
-             'headers': HeaderKeyDict({
-                 'x-content-type': 'text/plain',
-                 'x-etag': 'd41d8cd98f00b204e9800998ecf8427e',
-                 'x-size': '0',
-                 'x-timestamp': utils.Timestamp('12345').internal,
-                 'referer': 'PUT http://localhost/sda1/p/a/c/o',
-                 'user-agent': 'object-server %d' % os.getpid(),
-                 # system account storage policy is 0
-                 'X-Backend-Storage-Policy-Index': 0,
-                 'x-trans-id': '-'})})
-
-    @patch_policies([StoragePolicy(0, 'zero', True),
-                     StoragePolicy(1, 'one'),
                      StoragePolicy(26, 'twice-thirteen')])
     def test_updating_multiple_container_servers(self):
         # update router post patch
@@ -3404,10 +3283,6 @@ class TestObjectController(unittest.TestCase):
         put_timestamp = next(ts).internal
         delete_at_timestamp = utils.normalize_delete_at_timestamp(
             next(ts).normal)
-        delete_at_container = (
-            int(delete_at_timestamp) /
-            self.object_controller.expiring_objects_container_divisor *
-            self.object_controller.expiring_objects_container_divisor)
         headers = {
             'Content-Type': 'text/plain',
             'X-Timestamp': put_timestamp,
@@ -3415,49 +3290,14 @@ class TestObjectController(unittest.TestCase):
             'X-Container-Device': 'sda1',
             'X-Container-Partition': 'p',
             'X-Delete-At': delete_at_timestamp,
-            'X-Delete-At-Container': delete_at_container,
-            'X-Delete-At-Partition': 'p',
-            'X-Delete-At-Host': '10.0.0.2:6002',
-            'X-Delete-At-Device': 'sda1',
             'X-Backend-Storage-Policy-Index': int(policy)}
         if policy.policy_type == EC_POLICY:
             headers['X-Object-Sysmeta-Ec-Frag-Index'] = '2'
         req = Request.blank(
             '/sda1/p/a/c/o', method='PUT', body='', headers=headers)
         with fake_spawn(), mocked_http_conn(
-                500, 500, give_connect=capture_updates) as fake_conn:
+                500, give_connect=capture_updates):
             resp = req.get_response(self.object_controller)
-            self.assertRaises(StopIteration, fake_conn.code_iter.next)
-        self.assertEqual(resp.status_int, 201)
-        self.assertEqual(2, len(container_updates))
-        delete_at_update, container_update = container_updates
-        # delete_at_update
-        ip, port, method, path, headers = delete_at_update
-        self.assertEqual(ip, '10.0.0.2')
-        self.assertEqual(port, '6002')
-        self.assertEqual(method, 'PUT')
-        self.assertEqual(path, '/sda1/p/.expiring_objects/%s/%s-a/c/o' %
-                         (delete_at_container, delete_at_timestamp))
-        expected = {
-            'X-Timestamp': put_timestamp,
-            # system account storage policy is 0
-            'X-Backend-Storage-Policy-Index': 0,
-        }
-        for key, value in expected.items():
-            self.assertEqual(headers[key], str(value))
-        # container_update
-        ip, port, method, path, headers = container_update
-        self.assertEqual(ip, '10.0.0.1')
-        self.assertEqual(port, '6001')
-        self.assertEqual(method, 'PUT')
-        self.assertEqual(path, '/sda1/p/a/c/o')
-        expected = {
-            'X-Timestamp': put_timestamp,
-            'X-Backend-Storage-Policy-Index': int(policy),
-        }
-        for key, value in expected.items():
-            self.assertEqual(headers[key], str(value))
-        # check async pendings
         async_dir = os.path.join(self.testdir, 'sda1',
                                  diskfile.get_async_dir(policy))
         found_files = []
@@ -3470,13 +3310,11 @@ class TestObjectController(unittest.TestCase):
                     self.assertEqual(
                         int(data['headers']
                             ['X-Backend-Storage-Policy-Index']), int(policy))
-                elif data['account'] == '.expiring_objects':
-                    self.assertEqual(
-                        int(data['headers']
-                            ['X-Backend-Storage-Policy-Index']), 0)
+                    self.assertEqual(data['headers']['x-delete-at'],
+                                     delete_at_timestamp)    
                 else:
                     self.fail('unexpected async pending data')
-        self.assertEqual(2, len(found_files))
+        self.assertEqual(1, len(found_files))
 
     def test_async_update_saves_on_exception(self):
         policy = random.choice(list(POLICIES))
@@ -3901,223 +3739,14 @@ class TestObjectController(unittest.TestCase):
         self.assertTrue('chost,badhost' in msg)
         self.assertTrue('cdevice' in msg)
 
-    def test_delete_at_update_on_put(self):
-        # Test how delete_at_update works when issued a delete for old
-        # expiration info after a new put with no new expiration info.
+    def test_POST_calls_container_update(self):
         policy = random.choice(list(POLICIES))
         given_args = []
 
-        def fake_async_update(*args):
+        def fake_container_update(*args):
             given_args.extend(args)
 
-        req = Request.blank(
-            '/v1/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': 1,
-                     'X-Trans-Id': '123',
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        with mock.patch.object(self.object_controller, 'async_update',
-                               fake_async_update):
-            self.object_controller.delete_at_update(
-                'DELETE', 2, 'a', 'c', 'o', req, 'sda1', policy)
-        self.assertEqual(
-            given_args, [
-                'DELETE', '.expiring_objects', '0000000000',
-                '0000000002-a/c/o', None, None, None,
-                HeaderKeyDict({
-                    'X-Backend-Storage-Policy-Index': 0,
-                    'x-timestamp': utils.Timestamp('1').internal,
-                    'x-trans-id': '123',
-                    'referer': 'PUT http://localhost/v1/a/c/o'}),
-                'sda1', policy])
-
-    def test_delete_at_negative(self):
-        # Test how delete_at_update works when issued a delete for old
-        # expiration info after a new put with no new expiration info.
-        # Test negative is reset to 0
-        policy = random.choice(list(POLICIES))
-        given_args = []
-
-        def fake_async_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.async_update = fake_async_update
-        req = Request.blank(
-            '/v1/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': 1,
-                     'X-Trans-Id': '1234', 'X-Backend-Storage-Policy-Index':
-                     int(policy)})
-        self.object_controller.delete_at_update(
-            'DELETE', -2, 'a', 'c', 'o', req, 'sda1', policy)
-        self.assertEqual(given_args, [
-            'DELETE', '.expiring_objects', '0000000000', '0000000000-a/c/o',
-            None, None, None,
-            HeaderKeyDict({
-                # the expiring objects account is always 0
-                'X-Backend-Storage-Policy-Index': 0,
-                'x-timestamp': utils.Timestamp('1').internal,
-                'x-trans-id': '1234',
-                'referer': 'PUT http://localhost/v1/a/c/o'}),
-            'sda1', policy])
-
-    def test_delete_at_cap(self):
-        # Test how delete_at_update works when issued a delete for old
-        # expiration info after a new put with no new expiration info.
-        # Test past cap is reset to cap
-        policy = random.choice(list(POLICIES))
-        given_args = []
-
-        def fake_async_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.async_update = fake_async_update
-        req = Request.blank(
-            '/v1/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': 1,
-                     'X-Trans-Id': '1234',
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        self.object_controller.delete_at_update(
-            'DELETE', 12345678901, 'a', 'c', 'o', req, 'sda1', policy)
-        expiring_obj_container = given_args.pop(2)
-        expected_exp_cont = utils.get_expirer_container(
-            utils.normalize_delete_at_timestamp(12345678901),
-            86400, 'a', 'c', 'o')
-        self.assertEqual(expiring_obj_container, expected_exp_cont)
-
-        self.assertEqual(given_args, [
-            'DELETE', '.expiring_objects', '9999999999-a/c/o',
-            None, None, None,
-            HeaderKeyDict({
-                'X-Backend-Storage-Policy-Index': 0,
-                'x-timestamp': utils.Timestamp('1').internal,
-                'x-trans-id': '1234',
-                'referer': 'PUT http://localhost/v1/a/c/o'}),
-            'sda1', policy])
-
-    def test_delete_at_update_put_with_info(self):
-        # Keep next test,
-        # test_delete_at_update_put_with_info_but_missing_container, in sync
-        # with this one but just missing the X-Delete-At-Container header.
-        policy = random.choice(list(POLICIES))
-        given_args = []
-
-        def fake_async_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.async_update = fake_async_update
-        req = Request.blank(
-            '/v1/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': 1,
-                     'X-Trans-Id': '1234',
-                     'X-Delete-At-Container': '0',
-                     'X-Delete-At-Host': '127.0.0.1:1234',
-                     'X-Delete-At-Partition': '3',
-                     'X-Delete-At-Device': 'sdc1',
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        self.object_controller.delete_at_update('PUT', 2, 'a', 'c', 'o',
-                                                req, 'sda1', policy)
-        self.assertEqual(
-            given_args, [
-                'PUT', '.expiring_objects', '0000000000', '0000000002-a/c/o',
-                '127.0.0.1:1234',
-                '3', 'sdc1', HeaderKeyDict({
-                    # the .expiring_objects account is always policy-0
-                    'X-Backend-Storage-Policy-Index': 0,
-                    'x-size': '0',
-                    'x-etag': 'd41d8cd98f00b204e9800998ecf8427e',
-                    'x-content-type': 'text/plain',
-                    'x-timestamp': utils.Timestamp('1').internal,
-                    'x-trans-id': '1234',
-                    'referer': 'PUT http://localhost/v1/a/c/o'}),
-                'sda1', policy])
-
-    def test_delete_at_update_put_with_info_but_missing_container(self):
-        # Same as previous test, test_delete_at_update_put_with_info, but just
-        # missing the X-Delete-At-Container header.
-        policy = random.choice(list(POLICIES))
-        given_args = []
-
-        def fake_async_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.async_update = fake_async_update
-        self.object_controller.logger = self.logger
-        req = Request.blank(
-            '/v1/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': 1,
-                     'X-Trans-Id': '1234',
-                     'X-Delete-At-Host': '127.0.0.1:1234',
-                     'X-Delete-At-Partition': '3',
-                     'X-Delete-At-Device': 'sdc1',
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        self.object_controller.delete_at_update('PUT', 2, 'a', 'c', 'o',
-                                                req, 'sda1', policy)
-        self.assertEqual(
-            self.logger.get_lines_for_level('warning'),
-            ['X-Delete-At-Container header must be specified for expiring '
-             'objects background PUT to work properly. Making best guess as '
-             'to the container name for now.'])
-
-    def test_delete_at_update_delete(self):
-        policy = random.choice(list(POLICIES))
-        given_args = []
-
-        def fake_async_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.async_update = fake_async_update
-        req = Request.blank(
-            '/v1/a/c/o',
-            environ={'REQUEST_METHOD': 'DELETE'},
-            headers={'X-Timestamp': 1,
-                     'X-Trans-Id': '1234',
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        self.object_controller.delete_at_update('DELETE', 2, 'a', 'c', 'o',
-                                                req, 'sda1', policy)
-        self.assertEqual(
-            given_args, [
-                'DELETE', '.expiring_objects', '0000000000',
-                '0000000002-a/c/o', None, None,
-                None, HeaderKeyDict({
-                    'X-Backend-Storage-Policy-Index': 0,
-                    'x-timestamp': utils.Timestamp('1').internal,
-                    'x-trans-id': '1234',
-                    'referer': 'DELETE http://localhost/v1/a/c/o'}),
-                'sda1', policy])
-
-    def test_delete_backend_replication(self):
-        # If X-Backend-Replication: True delete_at_update should completely
-        # short-circuit.
-        policy = random.choice(list(POLICIES))
-        given_args = []
-
-        def fake_async_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.async_update = fake_async_update
-        req = Request.blank(
-            '/v1/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': 1,
-                     'X-Trans-Id': '1234',
-                     'X-Backend-Replication': 'True',
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        self.object_controller.delete_at_update(
-            'DELETE', -2, 'a', 'c', 'o', req, 'sda1', policy)
-        self.assertEqual(given_args, [])
-
-    def test_POST_calls_delete_at(self):
-        policy = random.choice(list(POLICIES))
-        given_args = []
-
-        def fake_delete_at_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.delete_at_update = fake_delete_at_update
+        self.object_controller.container_update = fake_container_update
 
         req = Request.blank(
             '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
@@ -4129,122 +3758,37 @@ class TestObjectController(unittest.TestCase):
         req.body = 'TEST'
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 201)
-        self.assertEqual(given_args, [])
+        self.assertEqual(given_args[5].get('X-Delete-At'), None)
 
+        # Only send container update upon x-delete-at change
         sleep(.00001)
-        req = Request.blank(
-            '/sda1/p/a/c/o',
-            environ={'REQUEST_METHOD': 'POST'},
-            headers={'X-Timestamp': normalize_timestamp(time()),
-                     'Content-Type': 'application/x-test',
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 202)
-        self.assertEqual(given_args, [])
-
-        sleep(.00001)
-        timestamp1 = normalize_timestamp(time())
-        delete_at_timestamp1 = str(int(time() + 1000))
-        req = Request.blank(
-            '/sda1/p/a/c/o',
-            environ={'REQUEST_METHOD': 'POST'},
-            headers={'X-Timestamp': timestamp1,
-                     'Content-Type': 'application/x-test',
-                     'X-Delete-At': delete_at_timestamp1,
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 202)
-        self.assertEqual(
-            given_args, [
-                'PUT', int(delete_at_timestamp1), 'a', 'c', 'o',
-                given_args[5], 'sda1', policy])
-
-        while given_args:
-            given_args.pop()
-
-        sleep(.00001)
-        timestamp2 = normalize_timestamp(time())
-        delete_at_timestamp2 = str(int(time() + 2000))
-        req = Request.blank(
-            '/sda1/p/a/c/o',
-            environ={'REQUEST_METHOD': 'POST'},
-            headers={'X-Timestamp': timestamp2,
-                     'Content-Type': 'application/x-test',
-                     'X-Delete-At': delete_at_timestamp2,
-                     'X-Backend-Storage-Policy-Index': int(policy)})
-        resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 202)
-        self.assertEqual(
-            given_args, [
-                'PUT', int(delete_at_timestamp2), 'a', 'c', 'o',
-                given_args[5], 'sda1', policy,
-                'DELETE', int(delete_at_timestamp1), 'a', 'c', 'o',
-                given_args[5], 'sda1', policy])
-
-    def test_PUT_calls_delete_at(self):
-        policy = random.choice(list(POLICIES))
         given_args = []
-
-        def fake_delete_at_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.delete_at_update = fake_delete_at_update
-
         req = Request.blank(
-            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
+            '/sda1/p/a/c/o',
+            environ={'REQUEST_METHOD': 'POST'},
             headers={'X-Timestamp': normalize_timestamp(time()),
-                     'Content-Length': '4',
-                     'Content-Type': 'application/octet-stream',
-                     'X-Backend-Storage-Policy-Index': int(policy),
-                     'X-Object-Sysmeta-Ec-Frag-Index': 4})
-        req.body = 'TEST'
+                     'Content-Type': 'application/x-test',
+                     'X-Backend-Storage-Policy-Index': int(policy)})
         resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 201)
+        self.assertEqual(resp.status_int, 202)
         self.assertEqual(given_args, [])
 
         sleep(.00001)
         timestamp1 = normalize_timestamp(time())
         delete_at_timestamp1 = str(int(time() + 1000))
         req = Request.blank(
-            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': timestamp1,
-                     'Content-Length': '4',
-                     'Content-Type': 'application/octet-stream',
-                     'X-Delete-At': delete_at_timestamp1,
-                     'X-Backend-Storage-Policy-Index': int(policy),
-                     'X-Object-Sysmeta-Ec-Frag-Index': 3})
-        req.body = 'TEST'
-        resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 201)
-        self.assertEqual(
-            given_args, [
-                'PUT', int(delete_at_timestamp1), 'a', 'c', 'o',
-                given_args[5], 'sda1', policy])
-
-        while given_args:
-            given_args.pop()
-
-        sleep(.00001)
-        timestamp2 = normalize_timestamp(time())
-        delete_at_timestamp2 = str(int(time() + 2000))
-        req = Request.blank(
             '/sda1/p/a/c/o',
-            environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': timestamp2,
-                     'Content-Length': '4',
-                     'Content-Type': 'application/octet-stream',
-                     'X-Delete-At': delete_at_timestamp2,
-                     'X-Backend-Storage-Policy-Index': int(policy),
-                     'X-Object-Sysmeta-Ec-Frag-Index': 3})
-        req.body = 'TEST'
+            environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': timestamp1,
+                     'Content-Type': 'application/x-test',
+                     'X-Delete-At': delete_at_timestamp1,
+                     'X-Backend-Storage-Policy-Index': int(policy)})
         resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 201)
-        self.assertEqual(
-            given_args, [
-                'PUT', int(delete_at_timestamp2), 'a', 'c', 'o',
-                given_args[5], 'sda1', policy,
-                'DELETE', int(delete_at_timestamp1), 'a', 'c', 'o',
-                given_args[5], 'sda1', policy])
+        self.assertEqual(resp.status_int, 202)
+        self.assertEqual(given_args[:4], ['PUT', 'a', 'c', 'o'])
+        self.assertEqual(given_args[-2:], ['sda1', policy])
+        self.assertEqual(given_args[5].get('X-Delete-At'),
+                         delete_at_timestamp1)
 
     def test_GET_but_expired(self):
         test_time = time() + 10000
@@ -4640,49 +4184,6 @@ class TestObjectController(unittest.TestCase):
                      'X-If-Delete-At': 'abc'})
         resp = req.get_response(self.object_controller)
         self.assertEqual(resp.status_int, 400)
-
-    def test_DELETE_calls_delete_at(self):
-        given_args = []
-
-        def fake_delete_at_update(*args):
-            given_args.extend(args)
-
-        self.object_controller.delete_at_update = fake_delete_at_update
-        timestamp1 = normalize_timestamp(time())
-        delete_at_timestamp1 = int(time() + 1000)
-        delete_at_container1 = str(
-            delete_at_timestamp1 /
-            self.object_controller.expiring_objects_container_divisor *
-            self.object_controller.expiring_objects_container_divisor)
-        req = Request.blank(
-            '/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
-            headers={'X-Timestamp': timestamp1,
-                     'Content-Length': '4',
-                     'Content-Type': 'application/octet-stream',
-                     'X-Delete-At': str(delete_at_timestamp1),
-                     'X-Delete-At-Container': delete_at_container1})
-        req.body = 'TEST'
-        resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 201)
-        self.assertEqual(given_args, [
-            'PUT', int(delete_at_timestamp1), 'a', 'c', 'o',
-            given_args[5], 'sda1', POLICIES[0]])
-
-        while given_args:
-            given_args.pop()
-
-        sleep(.00001)
-        timestamp2 = normalize_timestamp(time())
-        req = Request.blank(
-            '/sda1/p/a/c/o',
-            environ={'REQUEST_METHOD': 'DELETE'},
-            headers={'X-Timestamp': timestamp2,
-                     'Content-Type': 'application/octet-stream'})
-        resp = req.get_response(self.object_controller)
-        self.assertEqual(resp.status_int, 204)
-        self.assertEqual(given_args, [
-            'DELETE', int(delete_at_timestamp1), 'a', 'c', 'o',
-            given_args[5], 'sda1', POLICIES[0]])
 
     def test_PUT_delete_at_in_past(self):
         req = Request.blank(
