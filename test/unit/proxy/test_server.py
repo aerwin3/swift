@@ -684,6 +684,16 @@ class TestController(unittest.TestCase):
 @patch_policies([StoragePolicy(0, 'zero', True, object_ring=FakeRing())])
 class TestProxyServer(unittest.TestCase):
 
+    def test_creation(self):
+        # later config should be extended to assert more config options
+        app = proxy_server.Application({'node_timeout': '3.5',
+                                        'recoverable_node_timeout': '1.5'},
+                                       FakeMemcache(),
+                                       container_ring=FakeRing(),
+                                       account_ring=FakeRing())
+        self.assertEqual(app.node_timeout, 3.5)
+        self.assertEqual(app.recoverable_node_timeout, 1.5)
+
     def test_get_object_ring(self):
         baseapp = proxy_server.Application({},
                                            FakeMemcache(),
@@ -5620,15 +5630,53 @@ class TestObjectController(unittest.TestCase):
 
         # read most of the object, and disconnect
         fd.read(10)
-        fd.close()
-        sock.close()
-        sleep(0)
+        sock.fd._sock.close()
+        sleep(0.1)
 
         # check for disconnect message!
         expected = ['Client disconnected on read'] * 2
         self.assertEqual(
             _test_servers[0].logger.get_lines_for_level('warning'),
             expected)
+
+    @unpatch_policies
+    def test_ec_client_put_disconnect(self):
+        prolis = _test_sockets[0]
+
+        # create connection
+        sock = connect_tcp(('localhost', prolis.getsockname()[1]))
+        fd = sock.makefile()
+
+        # create container
+        fd.write('PUT /v1/a/ec-discon HTTP/1.1\r\n'
+                 'Host: localhost\r\n'
+                 'Content-Length: 0\r\n'
+                 'X-Storage-Token: t\r\n'
+                 'X-Storage-Policy: ec\r\n'
+                 '\r\n')
+        fd.flush()
+        headers = readuntil2crlfs(fd)
+        exp = 'HTTP/1.1 2'
+        self.assertEqual(headers[:len(exp)], exp)
+
+        # create object
+        obj = 'a' * 4 * 64 * 2 ** 10
+        fd.write('PUT /v1/a/ec-discon/test HTTP/1.1\r\n'
+                 'Host: localhost\r\n'
+                 'Content-Length: %d\r\n'
+                 'X-Storage-Token: t\r\n'
+                 'Content-Type: donuts\r\n'
+                 '\r\n%s' % (len(obj), obj[:-10]))
+        fd.flush()
+        fd.close()
+        sock.close()
+        # sleep to trampoline enough
+        sleep(0.1)
+        expected = ['Client disconnected without sending enough data']
+        warns = _test_servers[0].logger.get_lines_for_level('warning')
+        self.assertEqual(expected, warns)
+        errors = _test_servers[0].logger.get_lines_for_level('error')
+        self.assertEqual([], errors)
 
     @unpatch_policies
     def test_leak_1(self):
@@ -5678,8 +5726,7 @@ class TestObjectController(unittest.TestCase):
             exp = 'HTTP/1.1 200'
             self.assertEqual(headers[:len(exp)], exp)
             fd.read(1)
-            fd.close()
-            sock.close()
+            sock.fd._sock.close()
             # Make sure the GC is run again for pythons without reference
             # counting
             for i in range(4):
