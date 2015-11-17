@@ -450,6 +450,12 @@ class Replicator(Daemon):
             return self._usync_db(max(rinfo['point'], local_sync),
                                   broker, http, rinfo['id'], info['id'])
 
+    def _pre_replicate_hook(self, broker):
+        """
+        :param broker: the container that will be replicated
+        """
+        pass
+
     def _post_replicate_hook(self, broker, info, responses):
         """
         :param broker: the container that just replicated
@@ -476,6 +482,11 @@ class Replicator(Daemon):
             broker = self.brokerclass(object_file, pending_timeout=30)
             broker.reclaim(now - self.reclaim_age,
                            now - (self.reclaim_age * 2))
+            try:
+                self._pre_replicate_hook(broker)
+            except (Exception, Timeout) as e:
+                self.logger.exception('UNHANDLED EXCEPTION: in pre replicate '
+                                      'hook for %s', broker.db_file)
             info = broker.get_replication_info()
             bpart = self.ring.get_part(
                 info['account'], info.get('container'))

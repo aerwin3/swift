@@ -430,6 +430,34 @@ class TestContainerBroker(unittest.TestCase):
             self.assertEqual(conn.execute(
                 "SELECT deleted FROM object").fetchone()[0], 0)
 
+    def test_remove_expired_objects(self):
+        # Test ContainerBroker.put_object
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(Timestamp('1').internal, 0)
+
+        # Create initial object
+        obj_name = 'obj_name'
+        timestamp = Timestamp(time())
+        broker.put_object(obj_name, timestamp.internal, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9afe',
+                          expired_at=int(timestamp))
+        broker.put_object('ob_name2', timestamp.internal, 123,
+                          'application/x-test',
+                          '5af83e3196bf99f440f31f2e1a6c9aff',
+                          expired_at=int(timestamp))
+        with broker.get() as conn:
+            objs = conn.execute('select * from expired').fetchall()
+            self.assertEqual(len(objs), 2)
+        sleep(1)
+        broker.remove_expired_objects()
+        with broker.get() as conn:
+            objs = conn.execute('select * from expired').fetchall()
+            self.assertEqual(len(objs), 0)
+            obj_count = conn.execute('select count(*) ' +
+                                     'from object').fetchone()[0]
+            self.assertEqual(obj_count, 0)
+
     def test_expiring_object_input_and_deletion(self):
         # Test ContainerBroker.put_object
         broker = ContainerBroker(':memory:', account='a', container='c')
@@ -437,11 +465,11 @@ class TestContainerBroker(unittest.TestCase):
 
         # Create initial object
         obj_name = 'obj_name'
-        timestamp = Timestamp(time()).internal
-        broker.put_object(obj_name, timestamp, 123,
+        timestamp = Timestamp(time())
+        broker.put_object(obj_name, timestamp.internal, 123,
                           'application/x-test',
                           '5af83e3196bf99f440f31f2e1a6c9afe',
-                          expired_at=timestamp)
+                          expired_at=int(timestamp))
         with broker.get() as conn:
             # Check insert trigger
             row = conn.execute("SELECT object.name, expired.expired_at " +
@@ -449,7 +477,7 @@ class TestContainerBroker(unittest.TestCase):
                                "object.rowid = expired.obj_row_id").fetchone()
             self.assertIsNotNone(row)
             self.assertEqual(row['name'], obj_name)
-            self.assertEqual(row['expired_at'], timestamp)
+            self.assertEqual(row['expired_at'], int(timestamp))
             # Check delete trigger
             conn.execute("DELETE FROM object where name='obj_name'")
             rows = conn.execute("SELECT * FROM object").fetchall()

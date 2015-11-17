@@ -206,7 +206,7 @@ class ContainerBroker(DatabaseBroker):
         conn.executescript("""
             CREATE TABLE expired (
                obj_row_id INTEGER PRIMARY KEY,
-               expired_at TEXT
+               expired_at INTEGER
             );
 
             CREATE INDEX ix_expired_expired_at
@@ -336,6 +336,22 @@ class ContainerBroker(DatabaseBroker):
                 row = conn.execute(
                     'SELECT object_count from container_stat').fetchone()
             return (row[0] == 0)
+
+    def remove_expired_objects(self):
+        timestamp = int(time.time())
+        expired_count = 0
+        with self.get() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM object
+                WHERE rowid IN (
+                    SELECT obj_row_id
+                    FROM expired
+                    WHERE expired_at < %s
+                )''' % (timestamp))
+            expired_count = cursor.rowcount
+            conn.commit()
+        return expired_count
 
     def delete_object(self, name, timestamp, storage_policy_index=0):
         """
