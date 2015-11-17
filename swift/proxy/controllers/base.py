@@ -317,6 +317,7 @@ def get_account_info(env, app, swift_source=None):
 
         This call bypasses auth. Success does not imply that the request has
         authorization to the account.
+
     :raises ValueError: when path can't be split(path, 2, 4)
     """
     (version, account, _junk, _junk) = \
@@ -919,7 +920,6 @@ class ResumingGetter(object):
                         if nchunks % 5 == 0:
                             sleep()
 
-            part_iter = None
             try:
                 while True:
                     start_byte, end_byte, length, headers, part = \
@@ -931,10 +931,6 @@ class ResumingGetter(object):
                            'entity_length': length, 'headers': headers,
                            'part_iter': part_iter}
                     self.pop_range()
-            except GeneratorExit:
-                if part_iter:
-                    part_iter.close()
-                raise
             except StopIteration:
                 req.environ['swift.non_client_disconnect'] = True
 

@@ -26,7 +26,6 @@ import os
 import pwd
 import re
 import sys
-import threading as stdlib_threading
 import time
 import uuid
 import functools
@@ -63,7 +62,6 @@ import six
 from six.moves import cPickle as pickle
 from six.moves.configparser import (ConfigParser, NoSectionError,
                                     NoOptionError, RawConfigParser)
-from six.moves.queue import Queue, Empty
 from six.moves import range
 from six.moves.urllib.parse import ParseResult
 from six.moves.urllib.parse import quote as _quote
@@ -74,6 +72,11 @@ import swift.common.exceptions
 from swift.common.http import is_success, is_redirection, HTTP_NOT_FOUND, \
     HTTP_PRECONDITION_FAILED, HTTP_REQUESTED_RANGE_NOT_SATISFIABLE
 
+if six.PY3:
+    stdlib_queue = eventlet.patcher.original('queue')
+else:
+    stdlib_queue = eventlet.patcher.original('Queue')
+stdlib_threading = eventlet.patcher.original('threading')
 
 # logging doesn't import patched as cleanly as one would like
 from logging.handlers import SysLogHandler
@@ -1739,7 +1742,7 @@ def expand_ipv6(address):
 def whataremyips(bind_ip=None):
     """
     Get "our" IP addresses ("us" being the set of services configured by
-    one *.conf file). If our REST listens on a specific address, return it.
+    one `*.conf` file). If our REST listens on a specific address, return it.
     Otherwise, if listen on '0.0.0.0' or '::' return all addresses, including
     the loopback.
 
@@ -2333,7 +2336,7 @@ class GreenAsyncPile(object):
     def next(self):
         try:
             rv = self._responses.get_nowait()
-        except Empty:
+        except eventlet.queue.Empty:
             if self._inflight == 0:
                 raise StopIteration()
             rv = self._responses.get()
@@ -2984,8 +2987,8 @@ class ThreadPool(object):
 
     def __init__(self, nthreads=2):
         self.nthreads = nthreads
-        self._run_queue = Queue()
-        self._result_queue = Queue()
+        self._run_queue = stdlib_queue.Queue()
+        self._result_queue = stdlib_queue.Queue()
         self._threads = []
         self._alive = True
 
@@ -3065,7 +3068,7 @@ class ThreadPool(object):
             while True:
                 try:
                     ev, success, result = queue.get(block=False)
-                except Empty:
+                except stdlib_queue.Empty:
                     break
 
                 try:
@@ -3078,15 +3081,15 @@ class ThreadPool(object):
 
     def run_in_thread(self, func, *args, **kwargs):
         """
-        Runs func(*args, **kwargs) in a thread. Blocks the current greenlet
+        Runs ``func(*args, **kwargs)`` in a thread. Blocks the current greenlet
         until results are available.
 
         Exceptions thrown will be reraised in the calling thread.
 
         If the threadpool was initialized with nthreads=0, it invokes
-        func(*args, **kwargs) directly, followed by eventlet.sleep() to ensure
-        the eventlet hub has a chance to execute. It is more likely the hub
-        will be invoked when queuing operations to an external thread.
+        ``func(*args, **kwargs)`` directly, followed by eventlet.sleep() to
+        ensure the eventlet hub has a chance to execute. It is more likely the
+        hub will be invoked when queuing operations to an external thread.
 
         :returns: result of calling func
         :raises: whatever func raises
@@ -3126,7 +3129,7 @@ class ThreadPool(object):
 
     def force_run_in_thread(self, func, *args, **kwargs):
         """
-        Runs func(*args, **kwargs) in a thread. Blocks the current greenlet
+        Runs ``func(*args, **kwargs)`` in a thread. Blocks the current greenlet
         until results are available.
 
         Exceptions thrown will be reraised in the calling thread.

@@ -22,7 +22,7 @@ import os
 import pickle
 import sys
 import unittest
-from contextlib import closing, contextmanager, nested
+from contextlib import closing, contextmanager
 from gzip import GzipFile
 from shutil import rmtree
 import gc
@@ -54,7 +54,7 @@ from swift.common.utils import hash_path, json, storage_directory, \
 from test.unit import (
     connect_tcp, readuntil2crlfs, FakeLogger, fake_http_connect, FakeRing,
     FakeMemcache, debug_logger, patch_policies, write_fake_ring,
-    mocked_http_conn)
+    mocked_http_conn, DEFAULT_TEST_EC_TYPE)
 from swift.proxy import server as proxy_server
 from swift.proxy.controllers.obj import ReplicatedObjectController
 from swift.account import server as account_server
@@ -139,7 +139,7 @@ def do_setup(the_object_server):
         StoragePolicy(0, 'zero', True),
         StoragePolicy(1, 'one', False),
         StoragePolicy(2, 'two', False),
-        ECStoragePolicy(3, 'ec', ec_type='jerasure_rs_vand',
+        ECStoragePolicy(3, 'ec', ec_type=DEFAULT_TEST_EC_TYPE,
                         ec_ndata=2, ec_nparity=1, ec_segment_size=4096)])
     obj_rings = {
         0: ('sda1', 'sdb1'),
@@ -1831,7 +1831,7 @@ class TestObjectController(unittest.TestCase):
                     '4096')
                 self.assertEqual(
                     lmeta['x-object-sysmeta-ec-scheme'],
-                    'jerasure_rs_vand 2+1')
+                    '%s 2+1' % DEFAULT_TEST_EC_TYPE)
                 self.assertEqual(
                     lmeta['etag'],
                     md5(contents).hexdigest())
@@ -2049,10 +2049,8 @@ class TestObjectController(unittest.TestCase):
         commit_confirmation = \
             'swift.proxy.controllers.obj.ECPutter.send_commit_confirmation'
 
-        with nested(
-                mock.patch('swift.obj.server.md5', busted_md5_constructor),
-                mock.patch(commit_confirmation, mock_committer)) as \
-                (_junk, commit_call):
+        with mock.patch('swift.obj.server.md5', busted_md5_constructor), \
+                mock.patch(commit_confirmation, mock_committer):
             fd = sock.makefile()
             fd.write('PUT /v1/a/ec-con/quorum HTTP/1.1\r\n'
                      'Host: localhost\r\n'
@@ -2102,10 +2100,8 @@ class TestObjectController(unittest.TestCase):
         commit_confirmation = \
             'swift.proxy.controllers.obj.ECPutter.send_commit_confirmation'
 
-        with nested(
-                mock.patch(read_footer),
-                mock.patch(commit_confirmation, mock_committer)) as \
-                (read_footer_call, commit_call):
+        with mock.patch(read_footer) as read_footer_call, \
+                mock.patch(commit_confirmation, mock_committer):
             # Emulate missing footer MIME doc in all object-servers
             read_footer_call.side_effect = HTTPBadRequest(
                 body="couldn't find footer MIME doc")
@@ -3597,17 +3593,17 @@ class TestObjectController(unittest.TestCase):
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
 
-            class SlowBody(object):
+            class DisconnectedBody(object):
 
                 def __init__(self):
                     self.sent = 0
 
                 def read(self, size=-1):
-                    raise Exception('Disconnected')
+                    return ''
 
             req = Request.blank('/v1/a/c/o',
                                 environ={'REQUEST_METHOD': 'PUT',
-                                         'wsgi.input': SlowBody()},
+                                         'wsgi.input': DisconnectedBody()},
                                 headers={'Content-Length': '4',
                                          'Content-Type': 'text/plain'})
             self.app.update_request(req)
@@ -3891,11 +3887,10 @@ class TestObjectController(unittest.TestCase):
 
     def test_iter_nodes_gives_extra_if_error_limited_inline(self):
         object_ring = self.app.get_object_ring(None)
-        with nested(
-                mock.patch.object(self.app, 'sort_nodes', lambda n: n),
+        with mock.patch.object(self.app, 'sort_nodes', lambda n: n), \
                 mock.patch.object(self.app, 'request_node_count',
-                                  lambda r: 6),
-                mock.patch.object(object_ring, 'max_more_nodes', 99)):
+                                  lambda r: 6), \
+                mock.patch.object(object_ring, 'max_more_nodes', 99):
             first_nodes = list(self.app.iter_nodes(object_ring, 0))
             second_nodes = []
             for node in self.app.iter_nodes(object_ring, 0):
@@ -3909,18 +3904,16 @@ class TestObjectController(unittest.TestCase):
         object_ring = self.app.get_object_ring(None)
         node_list = [dict(id=n, ip='1.2.3.4', port=n, device='D')
                      for n in range(10)]
-        with nested(
-                mock.patch.object(self.app, 'sort_nodes', lambda n: n),
+        with mock.patch.object(self.app, 'sort_nodes', lambda n: n), \
                 mock.patch.object(self.app, 'request_node_count',
-                                  lambda r: 3)):
+                                  lambda r: 3):
             got_nodes = list(self.app.iter_nodes(object_ring, 0,
                                                  node_iter=iter(node_list)))
         self.assertEqual(node_list[:3], got_nodes)
 
-        with nested(
-                mock.patch.object(self.app, 'sort_nodes', lambda n: n),
+        with mock.patch.object(self.app, 'sort_nodes', lambda n: n), \
                 mock.patch.object(self.app, 'request_node_count',
-                                  lambda r: 1000000)):
+                                  lambda r: 1000000):
             got_nodes = list(self.app.iter_nodes(object_ring, 0,
                                                  node_iter=iter(node_list)))
         self.assertEqual(node_list, got_nodes)
@@ -6189,20 +6182,18 @@ class TestECMismatchedFA(unittest.TestCase):
         # Server obj1 will have the first version of the object (obj2 also
         # gets it, but that gets stepped on later)
         prosrv._error_limiting = {}
-        with nested(
-                mock.patch.object(obj3srv, 'PUT', bad_disk),
+        with mock.patch.object(obj3srv, 'PUT', bad_disk), \
                 mock.patch(
-                    'swift.common.storage_policy.ECStoragePolicy.quorum')):
+                    'swift.common.storage_policy.ECStoragePolicy.quorum'):
             type(ec_policy).quorum = mock.PropertyMock(return_value=2)
             resp = put_req1.get_response(prosrv)
         self.assertEqual(resp.status_int, 201)
 
         # Servers obj2 and obj3 will have the second version of the object.
         prosrv._error_limiting = {}
-        with nested(
-                mock.patch.object(obj1srv, 'PUT', bad_disk),
+        with mock.patch.object(obj1srv, 'PUT', bad_disk), \
                 mock.patch(
-                    'swift.common.storage_policy.ECStoragePolicy.quorum')):
+                    'swift.common.storage_policy.ECStoragePolicy.quorum'):
             type(ec_policy).quorum = mock.PropertyMock(return_value=2)
             resp = put_req2.get_response(prosrv)
         self.assertEqual(resp.status_int, 201)
@@ -6212,9 +6203,8 @@ class TestECMismatchedFA(unittest.TestCase):
                                 environ={"REQUEST_METHOD": "GET"},
                                 headers={"X-Auth-Token": "t"})
         prosrv._error_limiting = {}
-        with nested(
-                mock.patch.object(obj1srv, 'GET', bad_disk),
-                mock.patch.object(obj2srv, 'GET', bad_disk)):
+        with mock.patch.object(obj1srv, 'GET', bad_disk), \
+                mock.patch.object(obj2srv, 'GET', bad_disk):
             resp = get_req.get_response(prosrv)
         self.assertEqual(resp.status_int, 503)
 

@@ -40,13 +40,11 @@ from six.moves import range
 from textwrap import dedent
 
 import tempfile
-import threading
 import time
 import traceback
 import unittest
 import fcntl
 import shutil
-from contextlib import nested
 
 from getpass import getuser
 from shutil import rmtree
@@ -54,6 +52,7 @@ from functools import partial
 from tempfile import TemporaryFile, NamedTemporaryFile, mkdtemp
 from netifaces import AF_INET6
 from mock import MagicMock, patch
+from six.moves.configparser import NoSectionError, NoOptionError
 
 from swift.common.exceptions import (Timeout, MessageTimeout,
                                      ConnectionTimeout, LockTimeout,
@@ -63,6 +62,8 @@ from swift.common import utils
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.swob import Request, Response, HeaderKeyDict
 from test.unit import FakeLogger
+
+threading = eventlet.patcher.original('threading')
 
 
 class MockOs(object):
@@ -1546,9 +1547,8 @@ class TestUtils(unittest.TestCase):
         def my_ifaddress_error(interface):
             raise ValueError
 
-        with nested(
-                patch('netifaces.interfaces', my_interfaces),
-                patch('netifaces.ifaddresses', my_ifaddress_error)):
+        with patch('netifaces.interfaces', my_interfaces), \
+                patch('netifaces.ifaddresses', my_ifaddress_error):
             self.assertEqual(utils.whataremyips(), [])
 
     def test_whataremyips_ipv6(self):
@@ -1562,19 +1562,16 @@ class TestUtils(unittest.TestCase):
             return {AF_INET6:
                     [{'netmask': 'ffff:ffff:ffff:ffff::',
                       'addr': '%s%%%s' % (test_ipv6_address, test_interface)}]}
-        with nested(
-                patch('netifaces.interfaces', my_ipv6_interfaces),
-                patch('netifaces.ifaddresses', my_ipv6_ifaddresses)):
+        with patch('netifaces.interfaces', my_ipv6_interfaces), \
+                patch('netifaces.ifaddresses', my_ipv6_ifaddresses):
             myips = utils.whataremyips()
             self.assertEqual(len(myips), 1)
             self.assertEqual(myips[0], test_ipv6_address)
 
     def test_hash_path(self):
-        _prefix = utils.HASH_PATH_PREFIX
-        utils.HASH_PATH_PREFIX = ''
         # Yes, these tests are deliberately very fragile. We want to make sure
         # that if someones changes the results hash_path produces, they know it
-        try:
+        with mock.patch('swift.common.utils.HASH_PATH_PREFIX', ''):
             self.assertEqual(utils.hash_path('a'),
                              '1c84525acb02107ea475dcd3d09c2c58')
             self.assertEqual(utils.hash_path('a', 'c'),
@@ -1590,8 +1587,60 @@ class TestUtils(unittest.TestCase):
             utils.HASH_PATH_PREFIX = 'abcdef'
             self.assertEqual(utils.hash_path('a', 'c', 'o', raw_digest=False),
                              '363f9b535bfb7d17a43a46a358afca0e')
-        finally:
-            utils.HASH_PATH_PREFIX = _prefix
+
+    def test_validate_hash_conf(self):
+        # no section causes InvalidHashPathConfigError
+        self._test_validate_hash_conf([], [], True)
+
+        # 'swift-hash' section is there but no options causes
+        # InvalidHashPathConfigError
+        self._test_validate_hash_conf(['swift-hash'], [], True)
+
+        # if we have the section and either of prefix or suffix,
+        # InvalidHashPathConfigError doesn't occur
+        self._test_validate_hash_conf(
+            ['swift-hash'], ['swift_hash_path_prefix'], False)
+        self._test_validate_hash_conf(
+            ['swift-hash'], ['swift_hash_path_suffix'], False)
+
+        # definitely, we have the section and both of them,
+        # InvalidHashPathConfigError doesn't occur
+        self._test_validate_hash_conf(
+            ['swift-hash'],
+            ['swift_hash_path_suffix', 'swift_hash_path_prefix'], False)
+
+        # But invalid section name should make an error even if valid
+        # options are there
+        self._test_validate_hash_conf(
+            ['swift-hash-xxx'],
+            ['swift_hash_path_suffix', 'swift_hash_path_prefix'], True)
+
+    def _test_validate_hash_conf(self, sections, options, should_raise_error):
+
+        class FakeConfigParser(object):
+            def read(self, conf_path):
+                return True
+
+            def get(self, section, option):
+                if section not in sections:
+                    raise NoSectionError('section error')
+                elif option not in options:
+                    raise NoOptionError('option error', 'this option')
+                else:
+                    return 'some_option_value'
+
+        with mock.patch('swift.common.utils.HASH_PATH_PREFIX', ''), \
+                mock.patch('swift.common.utils.HASH_PATH_SUFFIX', ''), \
+                mock.patch('swift.common.utils.ConfigParser',
+                           FakeConfigParser):
+            try:
+                utils.validate_hash_conf()
+            except utils.InvalidHashPathConfigError:
+                if not should_raise_error:
+                    self.fail('validate_hash_conf should not raise an error')
+            else:
+                if should_raise_error:
+                    self.fail('validate_hash_conf should raise an error')
 
     def test_load_libc_function(self):
         self.assertTrue(callable(
@@ -1879,10 +1928,9 @@ log_name = %(yarr)s'''
             curr_time[0] += 0.001
             curr_time[0] += duration
 
-        with nested(
-                patch('time.time', my_time),
-                patch('time.sleep', my_sleep),
-                patch('eventlet.sleep', my_sleep)):
+        with patch('time.time', my_time), \
+                patch('time.sleep', my_sleep), \
+                patch('eventlet.sleep', my_sleep):
             start = time.time()
             func(*args, **kwargs)
             # make sure it's accurate to 10th of a second, converting the time
@@ -3828,9 +3876,8 @@ class TestRateLimitedIterator(unittest.TestCase):
             curr_time[0] += 0.001
             curr_time[0] += duration
 
-        with nested(
-                patch('time.time', my_time),
-                patch('eventlet.sleep', my_sleep)):
+        with patch('time.time', my_time), \
+                patch('eventlet.sleep', my_sleep):
             return func(*args, **kwargs)
 
     def test_rate_limiting(self):
